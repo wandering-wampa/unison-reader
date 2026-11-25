@@ -169,6 +169,7 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                         }
                         if (!users.setUp(req.password)) return@post call.respond(HttpStatusCode.Conflict, done)
                         users.throttle.clear(key)
+                        Setup.dropKeyFile(config, users)
                         val admin = users.byId(1)!!; val deviceName = req.device.ifBlank { device(call) }
                         val token = users.issue(admin.id, deviceName)
                         users.audit(admin.name, "server set up", address, deviceName)

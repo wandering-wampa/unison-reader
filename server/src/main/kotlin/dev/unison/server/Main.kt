@@ -53,6 +53,8 @@ fun main() {
     log.info("UnisonServer ${Version.NAME}: audiobooks=${config.audiobooks} ebooks=${config.ebooks} data=${config.data} workers=${config.workers} port=${config.port}")
     val catalog = Catalog(File(config.data, "catalog.db"))
     val users = Users(catalog.connection, config.token)
+    // A server set up after the first key was ended has no use for the file that start-up has just made again.
+    Setup.dropKeyFile(config, users)
     val stats = Stats(catalog.connection)
     val scanner = Scanner(config, catalog)
     val sync = SyncService(config, catalog, scanner)
@@ -114,5 +116,5 @@ fun main() {
 
 object Version {
     // Kept in step with the app's version at each release (it had stayed at 0.1.0 through nine phases).
-    const val NAME = "0.11.0"
+    const val NAME = "0.12.0"
 }

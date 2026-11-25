@@ -25,24 +25,14 @@ worker holds one chapter of audio in memory (under 200 MB for an hour-long chapt
 
 ## Running it
 
-The server runs as one container. The image is built from a clone of this repository with Docker alone: no
-JDK, Android SDK or other tools are needed on the machine, and it works the same on Linux, macOS and Windows.
+The server runs as one container from the image `ghcr.io/wandering-wampa/unison-reader`, published for x86-64 and
+ARM64. Docker with the Compose plugin is all the machine needs: no JDK, Android SDK or other tools, on Linux,
+macOS or Windows.
 
-1. Clone the repository and build the image from its top folder:
+1. Make an empty folder for the stack and put two files in it, both from `server/deploy/` in this repository:
+   `compose.yaml` as it is, and `.env.example` saved as `.env`.
 
-   ```sh
-   docker build -t unisonserver:local .
-   ```
-
-   The build compiles the server, fetches the reader's pinned third-party source and the speech model (checking
-   the model against its SHA-256; the build stops if it does not match) and installs ffmpeg. It takes a few
-   minutes the first time and needs network access. The image is built for the platform you build on: x86-64 or
-   ARM64.
-
-2. Make a folder for the stack and put two files in it: `server/deploy/compose.yaml` as it is, and a `.env` made
-   from `server/deploy/.env.example`. In the `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two
-   library folders, and take the `#` off the `UNISON_IMAGE=unisonserver:local` line so the stack runs the image
-   you built.
+2. In the `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two library folders.
 
 3. In that folder:
 
@@ -50,18 +40,32 @@ JDK, Android SDK or other tools are needed on the machine, and it works the same
    docker compose up -d
    ```
 
-Only those three lines of `.env` have to change. With the rest as `.env.example` has it, the server keeps its
+   The first run pulls the image.
+
+4. Open `http://<host>:8095` in a browser and do the first-run setup (next section).
+
+Only those two lines of `.env` have to change. With the rest as `.env.example` has it, the server keeps its
 data in `data/` beside `compose.yaml` (made on the first start) and the web client is at `http://<host>:8095`.
 When either library folder is not set, Compose refuses to start and names the missing line. The file can hold a
 secret (the webhook), so make it readable by you alone.
 
-To update, pull the new source, run the `docker build` again and run `docker compose up -d` again: the
-container is replaced and the data folder is left as it is.
+To update, pull the image again and run `docker compose up -d` again in that folder: the container is replaced
+and the data folder is left as it is. To stay on one release, set `UNISON_IMAGE` in the `.env` to the image with that
+release's tag, for example `ghcr.io/wandering-wampa/unison-reader:0.12.0`.
 
-The workflow in `.github/workflows/image.yml` builds the same Dockerfile for x86-64 and ARM64 and publishes it
-as `ghcr.io/wandering-wampa/unison-reader` when a release is tagged, with the version as its tag and `latest`.
-Until a release has published it, build the image yourself as above. Once it is there, leave `UNISON_IMAGE`
-out of the `.env` and `docker compose up -d` pulls it.
+#### Building the image from source
+
+To run your own changes, or on a platform the published image does not cover, clone the repository and build the
+image from its top folder:
+
+```sh
+docker build -t unisonserver:local .
+```
+
+The build compiles the server, fetches the reader's pinned third-party source and the speech model (checking the
+model against its SHA-256; the build stops if it does not match) and installs ffmpeg. It takes a few minutes the
+first time and needs network access. The image is built for the platform you build on. Then take the `#` off the
+`UNISON_IMAGE=unisonserver:local` line in the `.env` and run `docker compose up -d`.
 
 ### Deploying from Windows to a remote host
 
@@ -94,7 +98,7 @@ column says:
 
 | `.env` | From `local.properties` | What it is |
 |---|---|---|
-| `UNISON_IMAGE` | (the script writes `unisonserver:local`) | The image to run. The published `ghcr.io/wandering-wampa/unison-reader:latest` when absent; `unisonserver:local` for one you built yourself. |
+| `UNISON_IMAGE` | (the script writes `unisonserver:local`) | The image to run. The published `ghcr.io/wandering-wampa/unison-reader:latest` when absent; a version tag such as `:0.12.0` to stay on one release; `unisonserver:local` for one you built yourself. |
 | `UNISON_AUDIOBOOKS` | `unison.audiobooks` | The audiobook folder on the host, mounted read-only at `/audiobooks`. Needed. |
 | `UNISON_EBOOKS` | `unison.ebooks` | The ebook folder on the host (a Calibre library or a folder of EPUBs), mounted read-only at `/ebooks`. Needed. |
 | `UNISON_DATA` | (the script writes `/opt/stacks/unisonserver/data`) | Where the server keeps its own files on the host, mounted at `/data`. `./data`, a folder beside `compose.yaml`, when absent. To move it later, move the folder's contents too: an empty data folder is a new server. |
@@ -117,7 +121,7 @@ the defaults below apply:
 | `PORT` | `8080` | The port it listens on |
 | `UNISON_WORKERS` | a third of the cores, between 1 and 4 (the compose file says 4) | Books aligned at the same time |
 | `UNISON_MAX_EBOOK_MB` | `400` | The largest EPUB it will parse |
-| `UNISON_TOKEN` | made on the first start and kept in `data/token` | The install's first key, which is also the setup key (next section) |
+| `UNISON_TOKEN` | made on the first start and kept in `data/token` | The install's first key, which is also the setup key (next section). Setting up the server ends it |
 
 ### The first sign-in
 
@@ -169,9 +173,11 @@ rootless Docker and Podman, which can hand every connection to the container fro
 their own. The server then cannot tell inside from outside. On those, give `admin` its password before you
 forward a port or point a proxy at the server.
 
-The same key is the install's first sign-in for the API: it is listed among `admin`'s devices as `server`
-and is accepted as a bearer token. If you have no use for that, sign the device out on the Account page once
-you are signed in with the password. The file then opens nothing.
+Until the setup is done the same key also signs in to the API as `admin`, and it is listed among `admin`'s
+devices as `server`. Completing the setup ends it: the server signs that device out in the same step and deletes
+`data/token`, and a restart does not make a new one. From then on only passwords and the device tokens they
+produce get in. A server that was set up before this behaviour keeps its key until its `server` device is signed
+out on the Account page.
 
 ### Reaching it from outside the house
 
@@ -243,7 +249,7 @@ progress is visible through the API. Alignment VERSION is shared with the app th
 **Accounts.** `users` (name, PBKDF2-SHA256 password hash with a per-user salt, role admin or member),
 `tokens` (one per signed-in device, revocable) and `shelf` (user, work, state reading/queued/finished,
 added, finished_at) live beside the catalog. The install's original token belongs to the built-in
-`admin`, so a device connected before accounts existed keeps working as the admin; positions recorded
+`admin` until the setup ends it; positions recorded
 before accounts are the admin's. `POST /api/login` with name, password and a device name returns a
 device token; everything else under `/api` needs a token. Admins create and remove members and set
 passwords; each person's shelf, finished list and positions are their own.
@@ -259,7 +265,7 @@ address and per name (five misses, then a lockout doubling from 30 s to 15 min, 
 characters or more; every response carries a content security policy (scripts from the server only,
 styles and fonts from the server and Google Fonts, frames and media from the server and blob URLs), no
 framing, no sniffing, no referrer; the public health answer no longer lists what is syncing; the install's
-original token is seeded only on a fresh install and can be revoked like any device; the first-run setup
+original token is seeded only on a fresh install, ends when the first-run setup is done and can be revoked like any device before that; the first-run setup
 takes a password alone only from a private address and needs the setup key from anywhere else ("The first
 sign-in" above); and sign-ins, the setup,
 failures, lockouts, expiries, device sign-outs and account changes go to an `audit` table that admins see

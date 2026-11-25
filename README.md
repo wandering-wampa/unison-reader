@@ -46,7 +46,7 @@ The screenshots come from a demo library of public-domain books (Standard Ebooks
 
 It's in daily use here. For anyone else it's early. Before you spend an evening on it:
 
-- You build the server image yourself, with one `docker build` from a clone of this repository. It needs only Docker and works on any OS. The compose file then needs an `.env` with your two folders in it, and there's an `.env.example` to copy.
+- The server runs from a published Docker image for x86-64 and ARM64. ARM64 has been started under emulation but not run on real hardware.
 - Ebooks are read as EPUBs only. MOBI and AZW3 files are skipped, and a Calibre library is read from its `metadata.db` when there is one.
 - Narration follow only works for English books. The speech model is English, so other languages read and play fine but never sync.
 - The app needs Android 15 or later and is sideloaded. The APKs are debug-signed builds, not store releases.
@@ -58,12 +58,19 @@ It's in daily use here. For anyone else it's early. Before you spend an evening 
 
 - Ebooks as EPUB files in a folder, either a Calibre library (the folder with `metadata.db` in it) or any folder of EPUBs.
 - Audiobooks in `Author/Title/` folders, which is how Audiobookshelf lays them out. M4B, MP3 and the other common formats work.
-- A machine that runs Docker, with both folders mounted read-only. Calibre and Audiobookshelf don't need to be running.
+- A machine that runs Docker with the Compose plugin, with both folders mounted read-only. Calibre and Audiobookshelf don't need to be running.
 - An Android 15 or later phone for the app, or just a desktop browser.
 
-A new server has no password. The first time you open it in a browser it shows what it found in the two folders and asks you to choose the admin password. If you open it from outside your own network it also asks for a key that's in a file on the server, so a stranger can't get there first.
+## Running the server
 
-[The server guide](docs/SERVER.md) covers running it, the settings, the first sign-in and putting a reverse proxy in front of it.
+1. Make an empty folder and put two files from `server/deploy/` in this repository into it: `compose.yaml`, and `.env.example` saved as `.env`.
+2. In `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two folders.
+3. In that folder, run `docker compose up -d`. The first run pulls the image.
+4. Open `http://<host>:8095` in a browser. A new server has no password: the page shows what it found in the two folders and asks you to choose the admin password. If you open it from outside your own network it also asks for a key that's in a file on the server, so a stranger can't get there first. The key stops working once the setup is done.
+
+To build the image yourself instead, run `docker build -t unisonserver:local .` in a clone of this repository and set `UNISON_IMAGE=unisonserver:local` in `.env`.
+
+[The server guide](docs/SERVER.md) covers the settings, the first sign-in, updating and putting a reverse proxy in front of it.
 
 ## Download
 

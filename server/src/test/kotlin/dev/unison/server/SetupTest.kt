@@ -33,11 +33,71 @@ class SetupTest {
         assertFalse(users.hasPassword(1))
     }
 
-    @Test fun `the first key still signs in as admin after setup`() = users { users ->
-        val key = "0123456789abcdef0123456789abcdef0123456789abcdef"
+    private val key = "0123456789abcdef0123456789abcdef0123456789abcdef"
+
+    @Test fun `the first key signs in before setup and not after`() = users { users ->
         assertEquals("admin", users.authenticate(key)?.name)
+        assertTrue(users.keyActive())
         users.setUp("a first password")
+        assertNull(users.authenticate(key), "setup ends the key")
+        assertFalse(users.keyActive())
+        assertNotNull(users.login("admin", "a first password", "test"), "the password still signs in")
+    }
+
+    @Test fun `a refused setup leaves the key alone`() = users { users ->
+        assertFailsWith<IllegalArgumentException> { users.setUp("short") }
         assertEquals("admin", users.authenticate(key)?.name)
+    }
+
+    @Test fun `the key stays ended after a restart`() {
+        val dir = Files.createTempDirectory("unison-setup-").toFile()
+        try {
+            val first = Catalog(File(dir, "catalog.db"))
+            val users = Users(first.connection, key)
+            assertTrue(users.setUp("a first password"))
+            // Every device signed out, as when the only browser signs out: the table is empty at the next start.
+            users.revokeAll(1)
+            first.connection.close()
+            val second = Catalog(File(dir, "catalog.db"))
+            val again = Users(second.connection, key)
+            assertNull(again.authenticate(key), "an empty token table is not seeded on a server that is set up")
+            assertFalse(again.keyActive())
+            second.connection.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun `a server set up before the key ended keeps its key`() {
+        val dir = Files.createTempDirectory("unison-setup-").toFile()
+        try {
+            val first = Catalog(File(dir, "catalog.db"))
+            val users = Users(first.connection, key)
+            // An account with a password made by other means, as on an install from before first-run setup: the key is not touched.
+            users.create("someone", "their password", "member")
+            assertFalse(users.setupNeeded())
+            assertEquals("admin", users.authenticate(key)?.name)
+            first.connection.close()
+            val second = Catalog(File(dir, "catalog.db"))
+            val again = Users(second.connection, key)
+            assertEquals("admin", again.authenticate(key)?.name, "and after a restart")
+            assertTrue(again.keyActive())
+            second.connection.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun `the key file goes with the key`() {
+        val dir = Files.createTempDirectory("unison-setup-").toFile()
+        try {
+            val file = File(dir, "token").apply { writeText(key) }
+            val config = Config(dir, dir, dir, dir, key, 1, 0)
+            val catalog = Catalog(File(dir, "catalog.db"))
+            val users = Users(catalog.connection, key)
+            Setup.dropKeyFile(config, users)
+            assertTrue(file.isFile, "before setup the file stays")
+            users.setUp("a first password")
+            Setup.dropKeyFile(config, users)
+            assertFalse(file.exists(), "after setup it is removed")
+            catalog.connection.close()
+        } finally { dir.deleteRecursively() }
     }
 
     @Test fun `private and public addresses`() {

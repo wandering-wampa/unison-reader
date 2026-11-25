@@ -3,7 +3,7 @@ server can be set up only once: three short runs of the built distribution (grad
 throwaway folders under build/setup-check, on port 8097 or the one given. Needs java on PATH (. .\\Enter-Android.ps1).
 A caller from outside is imitated with the header a proxy would send; this machine itself counts as local.
 Nothing here prints a key or a token."""
-import json, os, shutil, subprocess, sys, threading, time, urllib.request
+import hashlib, json, os, shutil, sqlite3, subprocess, sys, threading, time, urllib.request
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8097
 BASE = f'http://127.0.0.1:{PORT}'
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +55,7 @@ def stop(p):
     except subprocess.TimeoutExpired: p.kill()
 
 def key_of(root): return open(os.path.join(root, 'data', 'token')).read().strip()
+def key_file(root): return os.path.join(root, 'data', 'token')
 def status(headers=None): return call('GET', '/api/setup', headers=headers)[1]
 def setup(body, headers=None): s, m, h = call('POST', '/api/setup', body, headers=headers); return s, m, h
 def login(password): return call('POST', '/api/login', {'name': 'admin', 'password': password, 'device': 'check-setup'})
@@ -66,6 +67,7 @@ except OSError: pass
 print('A new server on two empty folders, set up from this machine')
 p, root = start('local')
 try:
+    KEY = key_of(root)
     s = status()
     ok(s.get('needed') is True and s.get('key') is False and s.get('minPassword') == 8, f'setup is needed, and from this machine no key is asked for ({ {k: v for k, v in s.items() if k != "library"} })')
     for _ in range(40):
@@ -79,7 +81,7 @@ try:
                               ('Forwarded', 'for="[fd00::7]:4711"', False), ('CF-Connecting-IP', OUTSIDE, True), ('X-Forwarded-For', 'unknown', True)):
         ok(status({name: value})['key'] is want, f'{name}: {value} -> the key is {"asked for" if want else "not asked for"}')
     ok(login('')[0] == 401 and login(PASSWORD)[0] == 401, 'nobody can sign in as admin yet')
-    ok(call('GET', '/api/me', token=key_of(root))[1].get('user', {}).get('name') == 'admin', 'the first key signs in as admin, as before')
+    ok(call('GET', '/api/me', token=KEY)[1].get('user', {}).get('name') == 'admin', 'the first key signs in as admin before setup')
     ok(call('GET', '/api/me')[0] == 401 and call('GET', '/api/works')[0] == 401, 'the rest of the API still needs a sign-in')
     s, m, _ = setup({'password': 'short'})
     ok(s == 400, f'a password under eight characters: 400 ({m.get("message")})')
@@ -111,18 +113,32 @@ try:
     ok(status({'X-Forwarded-For': OUTSIDE}).get('library') is None, 'from outside too')
     s, m, _ = setup({'password': 'another-pass-phrase'})
     ok(s == 409 and login('another-pass-phrase')[0] == 401, f'a second setup: 409 ({m.get("message")}), and the password is unchanged')
-    s, m, _ = setup({'password': 'another-pass-phrase', 'key': key_of(root)}, {'X-Forwarded-For': OUTSIDE})
+    s, m, _ = setup({'password': 'another-pass-phrase', 'key': KEY}, {'X-Forwarded-For': OUTSIDE})
     ok(s == 409 and login('another-pass-phrase')[0] == 401, 'a second setup with the right key from outside: 409 as well')
-    ok(call('GET', '/api/me', token=key_of(root))[0] == 200, 'the first key still works until it is signed out')
+    ok(call('GET', '/api/me', token=KEY)[0] == 401 and not os.path.exists(key_file(root)), 'setup ended the first key: it is refused and its file is gone')
     audit = call('GET', '/api/users/audit', token=token)[1]
     done = [e for e in audit if e['action'] == 'server set up']; refused = [e for e in audit if e['action'] == 'setup refused']
     ok(len(done) == 1 and done[0]['user'] == 'admin' and done[0]['address'] == '127.0.0.1' and done[0]['detail'] == 'check-setup', f'the audit log has the setup once, with the address and device ({done[0] if done else None})')
     ok(len(refused) == 3 and {e['detail'] for e in refused} == {'no setup key', 'wrong setup key'} and all(e['address'] in (OUTSIDE, '127.0.0.1') for e in refused), f'and the three refusals ({[(e["address"], e["detail"]) for e in refused]})')
-    ok(not any(key_of(root) in json.dumps(e) or token in json.dumps(e) for e in audit), 'with no key or token in it')
+    ok(not any(KEY in json.dumps(e) or token in json.dumps(e) for e in audit), 'with no key or token in it')
 finally: stop(p)
 p, root = start('local', fresh=False)
 try:
     ok(status()['needed'] is False and login(f'{PASSWORD}-{i}')[0] == 200 and setup({'password': 'another-pass-phrase'})[0] == 409, 'after a restart it is still set up')
+    ok(call('GET', '/api/me', token=KEY)[0] == 401 and not os.path.exists(key_file(root)), 'and the first key is still refused, with no new key file')
+finally: stop(p)
+print('A server set up before the key ended: its key is put back in the database, as an older server had it')
+con = sqlite3.connect(os.path.join(root, 'data', 'catalog.db'))
+con.execute("INSERT INTO tokens (token, prefix, hashed, user, device, created, last_seen) VALUES (?, ?, 1, 1, 'server', 0, ?)", (hashlib.sha256(KEY.encode()).hexdigest(), KEY[:8], int(time.time() * 1000)))
+con.commit(); con.close()
+open(key_file(root), 'w').write(KEY)
+p, root = start('local', fresh=False)
+try:
+    ok(call('GET', '/api/me', token=KEY)[0] == 200 and os.path.exists(key_file(root)), 'a server that was already set up keeps its key and its file')
+finally: stop(p)
+p, root = start('local', fresh=False)
+try:
+    ok(call('GET', '/api/me', token=KEY)[0] == 200 and key_of(root) == KEY, 'and after another restart')
 finally: stop(p)
 
 print('A new server whose folders hold something, but no library; set up from outside with the key')
@@ -138,6 +154,7 @@ try:
     lib = status()['library']
     ok(lib['scanned'] and not lib['calibre'] and not lib['ebookFolderEmpty'] and not lib['audiobookFolderEmpty'] and lib['ebooks'] == 1 and lib['audiobooks'] == 0,
        f'a folder with a loose EPUB (unreadable, but still a book) and no metadata.db, and an audio folder with no audio: one ebook, no audiobook, neither reported empty ({lib})')
+    KEY2 = key_of(root)
     out = {'X-Forwarded-For': OUTSIDE}
     codes = [setup({'password': PASSWORD, 'key': f'guess-{n}'}, out)[0] for n in range(8)]
     ok(codes[:5] == [403] * 5 and codes[5:] == [429] * 3, f'wrong keys from one address are slowed after five: {codes}')
@@ -149,7 +166,8 @@ try:
     s, a, _ = setup({'password': PASSWORD, 'key': key_of(root) + '\n', 'device': 'check-setup-outside'}, {'X-Forwarded-For': ELSEWHERE})
     ok(s == 200 and a.get('user', {}).get('name') == 'admin', 'the right key (pasted with its line end) and a password of eight or more: set up and signed in')
     ok(login(PASSWORD)[0] == 200 and login('guess-0')[0] == 401, 'the password signs in')
-    ok(setup({'password': 'another-pass-phrase', 'key': key_of(root)}, {'X-Forwarded-For': ELSEWHERE})[0] == 409, 'and a second setup is refused')
+    ok(setup({'password': 'another-pass-phrase', 'key': KEY2}, {'X-Forwarded-For': ELSEWHERE})[0] == 409, 'and a second setup is refused')
+    ok(call('GET', '/api/me', token=KEY2)[0] == 401, 'and the key it was set up with no longer signs in')
     audit = call('GET', '/api/users/audit', token=a['token'])[1]
     ok([e['address'] for e in audit if e['action'] == 'server set up'] == [ELSEWHERE] and any(e['action'] == 'setup throttled' and e['address'] == OUTSIDE for e in audit),
        'the audit log names the address that set it up and the one that was slowed')

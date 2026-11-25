@@ -8,10 +8,12 @@
 #                                  starts it, waits for the server, prints its health and setup state; leaves it running on port 8095
 #   .\Test-Compose.ps1 -FromSource the clone path: builds the Dockerfile at the top of the repository from a clean export of HEAD
 #                                  (the committed files, as a clone has them), then the same
-#   .\Test-Compose.ps1 -Down       remove the container, its image and the folder
+#   .\Test-Compose.ps1 -Image ghcr.io/wandering-wampa/unison-reader:dev-68cea62
+#                                  the published path: no build at all; pulls that image and runs it with compose.yaml and the .env, then the same
+#   .\Test-Compose.ps1 -Down       remove the container, its image (a pulled one too) and the folder
 #
 # The libraries are the throwaway ones Start-LocalServer.ps1 makes (build\local-server) when they are there, else two empty folders.
-param([switch]$Down, [switch]$NoBuild, [switch]$FromSource, [string]$Ebooks, [string]$Audiobooks)
+param([switch]$Down, [switch]$NoBuild, [switch]$FromSource, [string]$Image, [string]$Ebooks, [string]$Audiobooks)
 $ErrorActionPreference = 'Stop'
 $stage = Join-Path $PSScriptRoot 'build\compose-test'
 $marker = Join-Path $PSScriptRoot 'build\compose-test-started-docker'
@@ -32,11 +34,15 @@ if (-not (Test-Docker)) {
     if (-not (Test-Docker)) { throw 'Docker did not start.' }
 }
 if (Get-NetTCPConnection -State Listen -LocalPort 8095 -ErrorAction SilentlyContinue) { throw 'Port 8095 is in use on this machine.' }
-if (-not $NoBuild -and -not $FromSource) { . "$PSScriptRoot\Enter-Android.ps1" | Out-Null; & "$PSScriptRoot\gradlew.bat" :server:installDist --console=plain -q; if ($LASTEXITCODE) { throw 'Server build failed.' } }
+if ($Image -and $FromSource) { throw '-Image and -FromSource do not go together.' }
+if (-not $NoBuild -and -not $FromSource -and -not $Image) { . "$PSScriptRoot\Enter-Android.ps1" | Out-Null; & "$PSScriptRoot\gradlew.bat" :server:installDist --console=plain -q; if ($LASTEXITCODE) { throw 'Server build failed.' } }
 
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage | Out-Null
-if ($FromSource) {
+if ($Image) {
+    # The published image needs only the compose file, as a stranger takes it from the repository.
+    Copy-Item (Join-Path $PSScriptRoot 'server\deploy\compose.yaml') "$stage\compose.yaml"
+} elseif ($FromSource) {
     # What a clone has: the committed files of HEAD with LF line endings, and nothing the repository ignores.
     $src = "$stage\src"; New-Item -ItemType Directory -Force $src | Out-Null
     & git -C $PSScriptRoot archive HEAD -o "$stage\src.tar"; if ($LASTEXITCODE) { throw 'git archive failed.' }
@@ -61,13 +67,14 @@ if (-not $Ebooks) { $Ebooks = Join-Path $fixture 'ebooks'; if (-not (Test-Path $
 if (-not $Audiobooks) { $Audiobooks = Join-Path $fixture 'audiobooks'; if (-not (Test-Path $Audiobooks)) { $Audiobooks = New-Item -ItemType Directory -Force "$stage\audiobooks" } }
 # .env is .env.example with the two folders and the image name filled in and nothing else touched: the rest must work as it stands.
 $lines = Get-Content (Join-Path $PSScriptRoot 'server\deploy\.env.example') | ForEach-Object {
-    if ($_ -match '^UNISON_AUDIOBOOKS=') { "UNISON_AUDIOBOOKS=$("$Audiobooks" -replace '\\', '/')" } elseif ($_ -match '^UNISON_EBOOKS=') { "UNISON_EBOOKS=$("$Ebooks" -replace '\\', '/')" } elseif ($_ -match '^#\s*UNISON_IMAGE=') { 'UNISON_IMAGE=unisonserver:local' } else { $_ }
+    if ($_ -match '^UNISON_AUDIOBOOKS=') { "UNISON_AUDIOBOOKS=$("$Audiobooks" -replace '\\', '/')" } elseif ($_ -match '^UNISON_EBOOKS=') { "UNISON_EBOOKS=$("$Ebooks" -replace '\\', '/')" } elseif ($_ -match '^#\s*UNISON_IMAGE=') { "UNISON_IMAGE=$(if ($Image) { $Image } else { 'unisonserver:local' })" } else { $_ }
 }
 Set-Content "$stage\.env" $lines
 
 Push-Location $stage
 try {
-    & docker build -t unisonserver:local $buildDir; if ($LASTEXITCODE) { throw 'docker build failed.' }
+    if ($Image) { & docker pull $Image; if ($LASTEXITCODE) { throw 'docker pull failed.' } }
+    else { & docker build -t unisonserver:local $buildDir; if ($LASTEXITCODE) { throw 'docker build failed.' } }
     & docker compose -p unison-test up -d; if ($LASTEXITCODE) { throw 'docker compose up failed.' }
 } finally { Pop-Location }
 $health = $null

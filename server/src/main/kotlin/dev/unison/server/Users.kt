@@ -22,8 +22,8 @@ import org.slf4j.LoggerFactory
  * (admin or member). Signing in from a device yields a random token for that device; only its SHA-256 is
  * stored, so the database alone cannot sign anyone in. A token that goes unused for a while expires
  * (thirty days for a browser, a year for the app), and each is revocable from the device list. The
- * install's original token belongs to the built-in admin on a fresh install only, and can be revoked
- * like any other once the devices have signed in by name. Sign-ins and account changes are audited.
+ * install's original token belongs to the built-in admin on a fresh install only; first-run setup revokes it,
+ * and a server that already has a password never seeds it. On a server set up before that it is revoked like any other device. Sign-ins and account changes are audited.
  */
 class Users(private val db: Connection, private val legacyToken: String) {
     private val log = LoggerFactory.getLogger("Users")
@@ -44,12 +44,13 @@ class Users(private val db: Connection, private val legacyToken: String) {
         // Tokens recorded in clear by earlier versions are replaced by their hashes, keeping the eight characters shown in device lists.
         for ((raw, _) in query("SELECT token, user FROM tokens WHERE hashed = 0") { it.getString(1) to it.getLong(2) })
             exec("UPDATE tokens SET token = ?, prefix = ?, hashed = 1 WHERE token = ?", sha256(raw), raw.take(8), raw)
-        // The built-in admin owns every position recorded before accounts existed; the install's original token is seeded on a fresh install only.
+        // The built-in admin owns every position recorded before accounts existed; the install's original token is seeded on a fresh install only,
+        // and never once an account has a password (first-run setup ends it, and a restart must not bring it back).
         if (byName("admin") == null) {
             exec("INSERT INTO users (id, name, role, created) VALUES (1, 'admin', 'admin', ?)", System.currentTimeMillis())
         }
         val admin = byName("admin")!!
-        if (query("SELECT COUNT(*) FROM tokens") { it.getInt(1) }.first() == 0)
+        if (setupNeeded() && query("SELECT COUNT(*) FROM tokens") { it.getInt(1) }.first() == 0)
             exec("INSERT OR IGNORE INTO tokens (token, prefix, hashed, user, device, created, last_seen) VALUES (?, ?, 1, ?, 'server', ?, ?)", sha256(legacyToken), legacyToken.take(8), admin.id, System.currentTimeMillis(), System.currentTimeMillis())
     }
 
@@ -130,8 +131,16 @@ class Users(private val db: Connection, private val legacyToken: String) {
     fun setUp(password: String): Boolean {
         require(password.length >= MIN_PASSWORD) { "A password is at least $MIN_PASSWORD characters" }
         val salt = salt()
-        return exec("UPDATE users SET hash = ?, salt = ? WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM users WHERE hash != '')", hash(password, salt), salt) == 1
+        return synchronized(db) {
+            val done = exec("UPDATE users SET hash = ?, salt = ? WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM users WHERE hash != '')", hash(password, salt), salt) == 1
+            // Setting up ends the install's first key: from here on it signs nobody in.
+            if (done) exec("DELETE FROM tokens WHERE token = ?", sha256(legacyToken))
+            done
+        }
     }
+
+    /** True while the install's first key (`data/token`, or `UNISON_TOKEN`) still signs someone in. */
+    fun keyActive(): Boolean = query("SELECT COUNT(*) FROM tokens WHERE token = ?", sha256(legacyToken)) { it.getInt(1) }.first() > 0
 
     /** True when this is the account's password. */
     fun checkPassword(id: Long, password: String): Boolean {

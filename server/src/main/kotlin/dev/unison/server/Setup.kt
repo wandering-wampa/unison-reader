@@ -20,6 +20,7 @@ import kotlinx.serialization.Serializable
  * first would otherwise own it, so the request is trusted on its own only from the machine itself or a
  * private network; from any other address it must carry the setup key, which is the install's first
  * key (`data/token`, or `UNISON_TOKEN`) and so is known only to someone who can read the server's files.
+ * Completing the setup ends that key: it stops signing in and its file is removed.
  */
 object Setup {
     /**
@@ -55,6 +56,16 @@ object Setup {
         var diff = 0
         for (i in a.indices) diff = diff or (a[i].code xor b[i].code)
         return diff == 0
+    }
+
+    /**
+     * Removes the key file once nothing accepts the key any more: after setup, and at start-up on a server that is
+     * set up and has no sign-in under that key. A server set up before the key ended keeps its key and its file.
+     * A key given by `UNISON_TOKEN` has no file and is left to the environment.
+     */
+    fun dropKeyFile(config: Config, users: Users) {
+        if (users.setupNeeded() || users.keyActive()) return
+        File(config.data, "token").takeIf { it.isFile }?.delete()
     }
 
     fun library(config: Config, works: List<Work>, scanned: Boolean) = SetupLibrary(
