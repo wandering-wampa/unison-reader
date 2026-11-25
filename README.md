@@ -1,8 +1,8 @@
 # UnisonReader
 
-Read the book, listen to the audiobook, or do both at once. UnisonReader knows where every sentence falls in the narration, so the page follows the voice, and switching between reading and listening never loses your place.
+An Android app, a server and a web client for reading an ebook and listening to its audiobook as the same book. The server works out when each sentence of the ebook is spoken in the audiobook. Once it has, the reader highlights the sentence being narrated and keeps the page with it, and you can stop listening and read on from that sentence.
 
-It is self-hosted: an Android app, a server you run at home that holds the library and does the heavy work, and a web client. It was built for one household and is shared as it is.
+I built it for my own household's library and it's shared as it is. The [Status](#status) section lists what's missing for anyone else.
 
 <p align="center">
   <img src="docs/screenshots/reader-narration.png" width="19%" alt="The reader following the narration: the sentence being spoken is highlighted">
@@ -12,61 +12,70 @@ It is self-hosted: an Android app, a server you run at home that holds the libra
   <img src="docs/screenshots/year.png" width="19%" alt="The year in review">
 </p>
 
-## What it does
+## How it works
 
-**The page follows the voice.** The server listens to each audiobook with a speech model and works out when every sentence of the ebook is spoken. In the reader, the sentence being narrated is highlighted and the text moves with it, in the book's own layout. Press Listen here on any page and the narration starts from that page; stop listening and you are on the right page to keep reading. Sentences the model could not place are left unmatched, never guessed.
+You point the server at two folders: a Calibre library and a folder of audiobooks. It reads them and never writes to either. It matches each audiobook to its ebook by title, author and series. The ones it can't match show up in a list, and an admin pairs them by hand.
 
-**Your place is one place.** Read on the phone at lunch, listen in the car, pick the book up in a browser at night: it opens where you stopped, whichever way you got there. If two devices have moved the same book apart (a phone that was offline, say), nothing jumps: you are shown both places and asked which to keep.
+For each pair, the server runs the audio through a speech model and lines the output up against the book's text. That gives a start and end time for nearly every sentence. A thirty-hour audiobook takes about twenty minutes on a six-core laptop processor. Where the model can't place a sentence it leaves it unmatched. There is no guessing from page position or elapsed time.
 
-**It runs on the library you already have.** UnisonServer reads a Calibre library and a folder of audiobooks exactly as they are and never writes to either. It pairs each ebook with its audiobook by title, author and series, syncs the pair in the background, and tells you which books are ready, which are still syncing and which are missing a half. When a title or cover is wrong, an admin corrects it in Unison (with a lookup to fill in the details) and the files stay untouched.
+In the app or the web reader, open the book and press Listen here on any page. Narration starts from that page, the spoken sentence is highlighted, and the page keeps up. Pause and you're looking at the sentence you just heard.
 
-**It is for a household.** Each person signs in and has their own shelf, places, bookmarks and highlights, collections, and reading statistics. An admin adds people, pairs the books the scanner could not, and sees what the server is doing. There is a shared wanted list for books the library does not have yet; it marks a request as arrived when the book turns up.
-
-**Phone, car and browser.** The Android app reads, plays and keeps books for offline use. In the car it appears in Android Auto with your shelf, recent books and series, and answers "play … on Unison". The web client is the same library, player and reader in a desktop browser, with narration follow, served by your own server.
+Your place lives on the server, one per person. Read on the phone, then open the book in a browser, and it's at the same sentence. If two devices have both moved since they last synced (a phone that was offline, say), you're shown both places and asked which to keep. Nothing jumps on its own.
 
 <p align="center">
   <img src="docs/screenshots/web-reader.jpg" width="49%" alt="The web reader following the narration">
   <img src="docs/screenshots/web-shelf.jpg" width="49%" alt="The web shelf">
 </p>
 
-**A record of your reading.** Listening and reading time are counted per person in their own time zone, with streaks, and each year ends in a one-page review you can share as a picture.
+## The pieces
+
+- The Android app reads EPUBs in the publisher's layout, plays audiobooks, follows narration and keeps books for offline use. In a car it shows up in Android Auto with your shelf, recent books and series, and it answers "play … on Unison".
+- The web client is the same library, reader and player in a desktop browser. The server serves it; there's nothing extra to install.
+- The Wear OS app plays the audiobooks on your shelf from the watch itself, streamed or downloaded, over Wi-Fi or LTE. It's new and has had very little use on a real watch.
+- The server is a Kotlin service with a SQLite database, run in Docker. Each person signs in and gets their own shelf, places, bookmarks, highlights and collections. An admin adds people, fixes pairings and corrects a wrong title or cover without touching the files.
+
+Two smaller things. People can ask for books the library doesn't have, and the request is marked as arrived when the book turns up. Reading and listening time is counted per person, with streaks and a one-page review of the year that you can save as a picture.
 
 <p align="center">
   <img src="docs/screenshots/web-year.jpg" width="60%" alt="The year in review on the web">
 </p>
 
-The pictures show the demo library that `Start-LocalServer.ps1 -Demo` builds: public-domain books in their Standard Ebooks editions, two of them with LibriVox recordings, and a year of made-up reading.
+The screenshots come from a demo library of public-domain books (Standard Ebooks editions, two with LibriVox recordings) and a made-up year of reading. `Start-LocalServer.ps1 -Demo` builds the same library, if you want to see narration follow before pointing it at your own books.
 
-## Pieces
+## Status
 
-- **UnisonReader**, the Android app.
-- **UnisonServer**, a small service in Docker. It reads the Calibre and audiobook folders without changing them, pairs ebooks with audiobooks, aligns them, and serves everything to the app and the web.
-- **The web client**, served by UnisonServer at its address.
-- **Unison for Wear OS**, a watch app that plays the server's audiobooks on its own, streamed or downloaded, and keeps the same place as the phone and the browser. Wear OS 6 and later.
+It's in daily use here. For anyone else it's early. Before you spend an evening on it:
+
+- There's no Docker image to pull. You build the server from this repository, and the scripts that do it are PowerShell, written on Windows.
+- There's no setup screen. A new server's first password is set with one `curl` command, described under "The first sign-in" in [the server guide](docs/SERVER.md).
+- Ebooks have to be in a Calibre library. A plain folder of EPUBs isn't read yet.
+- Narration follow only works for English books. The speech model is English, so other languages read and play fine but never sync.
+- The app needs Android 15 or later and is sideloaded. The APKs are debug-signed builds, not store releases.
+- Sign-in is a password. It's throttled and logged, but there's no second factor, so think before you put a server on the open internet.
+- The web client is laid out for desktop browsers, and it loads its font from Google Fonts.
+- Looking a book up, to ask for it or to fix its details, sends the words you typed to Audible's catalogue and Open Library.
 
 ## What you need
 
-- **An ebook library that Calibre manages** (its folder with `metadata.db`). EPUBs are read.
-- **A folder of audiobooks** laid out `Author/Title/`, the way Audiobookshelf keeps them (M4B, MP3 and the other common formats).
-- **A machine that runs Docker**, with both folders mounted read-only. Neither Calibre nor Audiobookshelf has to be running.
-- **An Android 15 or later phone** for the app. The web client needs only a desktop browser.
+- A Calibre library, meaning the folder with `metadata.db` in it. EPUBs are what gets read.
+- Audiobooks in `Author/Title/` folders, which is how Audiobookshelf lays them out. M4B, MP3 and the other common formats work.
+- A machine that runs Docker, with both folders mounted read-only. Calibre and Audiobookshelf don't need to be running.
+- An Android 15 or later phone for the app, or just a desktop browser.
 
-There is no published Docker image yet: the server is built from this repository and shipped to the host by a script. [UnisonServer](docs/SERVER.md) has the steps, the settings, the first sign-in, and what to put in front of it to reach it from outside the house.
+[The server guide](docs/SERVER.md) covers running it, the settings, the first sign-in and putting a reverse proxy in front of it.
 
 ## Download
 
-The current apps are on the [Releases page](https://github.com/wandering-wampa/unison-reader/releases/latest): `UnisonReader-<version>.apk` for the phone and `UnisonReader-wear-<version>.apk` for a Wear OS watch. Open the file on the phone, or from a computer run `adb install -r UnisonReader-<version>.apk`. Installing over an older version keeps the library and positions. They are debug-signed builds for sideloading, not store releases. From 0.9.0 the app is about 25 MB and reads and listens from a UnisonServer: importing files and syncing on the phone itself are no longer in the default build (see [Build and install](docs/BUILD.md) for the standalone build). The release notes carry the SHA-256 of each file.
+The APKs are on the [Releases page](https://github.com/wandering-wampa/unison-reader/releases/latest): `UnisonReader-<version>.apk` for the phone and `UnisonReader-wear-<version>.apk` for a Wear OS watch. Open the file on the device, or run `adb install -r UnisonReader-<version>.apk` from a computer. Installing over an older version keeps your books and places. Each release lists the SHA-256 of both files.
 
 ## Documentation
 
-Everything technical is in [`docs/`](docs/):
-
-- [UnisonServer: running it, settings, design, API](docs/SERVER.md)
-- [Build and install](docs/BUILD.md)
+- [Running the server: setup, settings, design, API](docs/SERVER.md)
+- [Building the apps and the server](docs/BUILD.md)
 - [How the alignment works](docs/ALIGNMENT.md)
 - [Testing](docs/TESTING.md)
 - [Third-party licences](docs/THIRD_PARTY.md)
 
 ## Licence
 
-UnisonReader, UnisonServer and the web client are under the [MIT licence](LICENSE). The libraries, fonts and speech model they build on keep their own licences, listed in [Third-party licences](docs/THIRD_PARTY.md).
+MIT, see [LICENSE](LICENSE). The libraries, fonts and speech model it builds on keep their own licences, listed in [Third-party licences](docs/THIRD_PARTY.md).

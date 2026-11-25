@@ -61,24 +61,31 @@ object Sync {
 
     sealed class Pulled {
         object Nothing : Pulled()
-        /** A newer place from another device, nothing having moved here: `audio` is where to go on from. */
-        class Newer(val audio: Long, val updated: Long, val by: String) : Pulled()
+        /** A newer place from another device, nothing having moved here: `audio` is where to go on from, `passage` the text's place that came with it. */
+        class Newer(val audio: Long, val passage: Int, val updated: Long, val by: String) : Pulled()
         /** Two places far apart, for the person to choose between. */
-        class Apart(val audio: Long, val updated: Long, val by: String) : Pulled()
+        class Apart(val audio: Long, val passage: Int, val updated: Long, val by: String) : Pulled()
     }
 
     fun apart(a: Long, b: Long) = kotlin.math.abs(a - b) > 120_000
 
     /**
-     * Where a place saved by another device is in the audio. Usually its own audio time; but a place that was read
-     * on in the text (the sentence is well past what was last listened to) is taken at that sentence, because on a
-     * watch the audio is the whole book: listening goes on from where the reading stopped.
+     * Where a place saved by another device is in the audio: its audio time, as the phone's and the web's players take
+     * it. The text's place is a separate thing (someone can be reading in one part and listening in another) and never
+     * decides where the watch starts; only a book that was read and never listened to, which has no audio time at all,
+     * starts where the reading is.
      */
-    private fun audioOf(store: Store, id: String, p: ServerClient.Position): Long {
-        if (p.passage <= 0 || !store.hasAnchors(id)) return p.audio
-        val narrated = store.passageAt(id, p.audio)
-        return if (kotlin.math.abs(p.passage - narrated) > 30) store.audioAt(id, p.passage) ?: p.audio else p.audio
-    }
+    private fun audioOf(store: Store, id: String, p: ServerClient.Position): Long =
+        if (p.audio <= 0 && p.passage > 0) store.audioAt(id, p.passage) ?: 0 else p.audio
+
+    /**
+     * The sentence the watch sends with its audio place. Other devices take a place whole, text and audio, so this is
+     * what the phone's text opens at after listening on the watch. Where the text and the audio were together when the
+     * watch took the place, they stay together (the sentence being narrated); where they were apart, the text is left
+     * exactly where it was. The watch never moves someone's reading place on its own.
+     */
+    private fun passageFor(store: Store, id: String, audio: Long): Int =
+        if (store.together(id) && store.hasAnchors(id)) store.passageAt(id, audio) else store.passage(id)
 
     /**
      * What another device's newest place means here. With `apply`, a newer place is taken at once when nothing moved
@@ -92,12 +99,12 @@ object Sync {
         val moved = if (sent < 0) here > 0 else sent != here
         val playingHere = PlaybackService.playingBook() == id && (PlaybackService.playing() || PlaybackService.starting(id))
         if (!moved && !playingHere) {
-            if (apply) take(context, id, there, remote.updated)
-            return Pulled.Newer(there, remote.updated, remote.by)
+            if (apply) take(context, id, there, remote.passage, remote.updated)
+            return Pulled.Newer(there, remote.passage, remote.updated, remote.by)
         }
         if (playingHere || !apart(here, there)) return Pulled.Nothing
-        if (apply) store.elsewhere(id, there, remote.updated, remote.by)
-        return Pulled.Apart(there, remote.updated, remote.by)
+        if (apply) store.elsewhere(id, there, remote.passage, remote.updated, remote.by)
+        return Pulled.Apart(there, remote.passage, remote.updated, remote.by)
     }
 
     /** The server's newest place for a book, considered (not applied). */
@@ -108,8 +115,11 @@ object Sync {
     }
 
     /** The other device's place becomes this watch's; a player holding the book (paused) moves with it. */
-    fun take(context: Context, id: String, audio: Long, updated: Long) {
+    fun take(context: Context, id: String, audio: Long, passage: Int, updated: Long) {
         val store = Store(context)
+        // Text and audio count as together when the text is within thirty sentences of what is narrated there (or there is no text place at all).
+        val together = passage <= 0 || (store.hasAnchors(id) && kotlin.math.abs(store.passageAt(id, audio) - passage) <= 30)
+        store.textPlace(id, passage, together)
         store.audio(id, audio); store.markPushed(id, audio, updated); store.clearElsewhere(id)
         if (PlaybackService.playingBook() == id) PlaybackService.send(context, "seek", id, audio)
     }
@@ -128,7 +138,7 @@ object Sync {
         val epoch = Store.epoch
         val audio = store.audio(id)
         if (!force && (store.pushed(id) == audio || (store.pushed(id) < 0 && audio == 0L))) return true
-        val passage = store.passageAt(id, audio)
+        val passage = passageFor(store, id, audio)
         if (force) {
             val sent = runCatching { client.putPosition(id, passage, audio) }
             sent.onSuccess { if (Store.epoch == epoch) { store.markPushed(id, audio, it.updated); store.clearElsewhere(id) } }
@@ -141,7 +151,7 @@ object Sync {
         val there = audioOf(store, id, answer.position)
         val playingHere = PlaybackService.playingBook() == id && PlaybackService.playing()
         if (playingHere || !apart(audio, there)) return push(context, id, force = true)
-        store.elsewhere(id, there, answer.position.updated, answer.position.by)
+        store.elsewhere(id, there, answer.position.passage, answer.position.updated, answer.position.by)
         return true
     }
 

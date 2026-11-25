@@ -68,16 +68,41 @@ if not os.path.exists(catalog):
 # Two audiobooks with no ebook to pair with (so nothing tries to sync them), for the watch app and the players: tones,
 # a different pitch for each track, written as WAV. The scanner reads their lengths through ffprobe; a machine without
 # one gets a stand-in from Start-LocalServer.ps1 (server/local/ffprobe_stub.cs).
-import array, math, wave
-AUDIO = [  # author, title, tracks as (file name, seconds, pitch)
-    ('Tomas Reed', 'The Tin Lighthouse', [('01 - The Keeper', 150, 330), ('02 - The Storm', 180, 392), ('03 - The Lamp', 120, 440)]),
+import array, math, struct, wave, zlib
+AUDIO = [  # author, title, tracks as (file name, seconds, pitch), the cover's sky (top, bottom) and its light
+    ('Tomas Reed', 'The Tin Lighthouse', [('01 - The Keeper', 150, 330), ('02 - The Storm', 180, 392), ('03 - The Lamp', 120, 440)], ((12, 44, 74), (4, 16, 30)), (255, 226, 150)),
     # Not by Ines Calder: check_phase9.py counts her books.
-    ('Mira Voss', 'Harbour Lights', [('Harbour Lights', 240, 262)]),
+    ('Mira Voss', 'Harbour Lights', [('Harbour Lights', 240, 262)], ((92, 38, 84), (232, 120, 60)), (255, 244, 214)),
 ]
-for author, title, tracks in AUDIO:
+
+def cover(path, sky, light, size=360):
+    """A cover made here (a sky, a light over water) so the clients have a picture to show: a plain RGB PNG."""
+    top, bottom = sky
+    rows = bytearray()
+    for y in range(size):
+        rows.append(0)
+        t = y / (size - 1)
+        for x in range(size):
+            c = [top[i] + (bottom[i] - top[i]) * t for i in range(3)]
+            d = math.hypot(x - size * .62, y - size * .34) / (size * .15)  # the light, with a soft edge
+            glow = 1 if d < 1 else max(0, 1 - (d - 1) * 1.6) * .55
+            if y > size * .72: glow = .35 * max(0, 1 - abs(x - size * .62) / (size * .1)) * (1 if (y // 5) % 2 else .4)  # its path on the water
+            rows += bytes(int(c[i] + (light[i] - c[i]) * glow) for i in range(3))
+    def chunk(kind, data): return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+    with open(path, 'wb') as f:
+        f.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(bytes(rows), 9)) + chunk(b'IEND', b''))
+
+for author, title, tracks, sky, light in AUDIO:
     folder = os.path.join(audio, author, title)
-    if os.path.isdir(folder): continue
+    if os.path.isdir(folder):
+        if not os.path.exists(os.path.join(folder, 'cover.png')):
+            cover(os.path.join(folder, 'cover.png'), sky, light)
+            # The scanner looks for a cover only when the audio files changed: touch them so it looks again.
+            for name in os.listdir(folder):
+                if name.endswith('.wav'): os.utime(os.path.join(folder, name))
+        continue
     os.makedirs(folder)
+    cover(os.path.join(folder, 'cover.png'), sky, light)
     for name, seconds, pitch in tracks:
         # One second of sound: a quarter-second note, then quiet. Repeated, so a place in the track can be heard as a beat.
         rate = 8000

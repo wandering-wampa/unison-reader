@@ -111,10 +111,20 @@ class Store(context: Context) {
     fun serverUpdated(id: String): Long = prefs.getLong("$id.serverUpdated", 0)
     fun markPushed(id: String, audio: Long, updated: Long) { prefs.edit().putLong("$id.pushed", audio).putLong("$id.serverUpdated", updated).commit() }
     /** Another device's place, far from this watch's, waiting for the person to choose: audio, the server's time, and the device's name. */
-    fun elsewhere(id: String): Triple<Long, Long, String>? =
-        prefs.getLong("$id.elsewhereAt", 0).takeIf { it > serverUpdated(id) }?.let { Triple(prefs.getLong("$id.elsewhere", 0), it, prefs.getString("$id.elsewhereBy", "").orEmpty()) }
-    fun elsewhere(id: String, audio: Long, updated: Long, by: String) { prefs.edit().putLong("$id.elsewhere", audio).putLong("$id.elsewhereAt", updated).putString("$id.elsewhereBy", by).commit() }
-    fun clearElsewhere(id: String) { prefs.edit().remove("$id.elsewhere").remove("$id.elsewhereAt").remove("$id.elsewhereBy").commit() }
+    class Elsewhere(val audio: Long, val passage: Int, val updated: Long, val by: String)
+    fun elsewhere(id: String): Elsewhere? =
+        prefs.getLong("$id.elsewhereAt", 0).takeIf { it > serverUpdated(id) }?.let { Elsewhere(prefs.getLong("$id.elsewhere", 0), prefs.getInt("$id.elsewherePassage", 0), it, prefs.getString("$id.elsewhereBy", "").orEmpty()) }
+    fun elsewhere(id: String, audio: Long, passage: Int, updated: Long, by: String) { prefs.edit().putLong("$id.elsewhere", audio).putInt("$id.elsewherePassage", passage).putLong("$id.elsewhereAt", updated).putString("$id.elsewhereBy", by).commit() }
+    fun clearElsewhere(id: String) { prefs.edit().remove("$id.elsewhere").remove("$id.elsewherePassage").remove("$id.elsewhereAt").remove("$id.elsewhereBy").commit() }
+
+    /**
+     * The text's place that came with the audio place the watch last took, and whether the two were together then
+     * (reading and listening in step) or apart (reading in one part, listening in another). The watch sends the text's
+     * place back as it was unless they were together; a book never taken from the server starts with them together.
+     */
+    fun passage(id: String): Int = prefs.getInt("$id.passage", 0)
+    fun together(id: String): Boolean = prefs.getBoolean("$id.together", true)
+    fun textPlace(id: String, passage: Int, together: Boolean) { prefs.edit().putInt("$id.passage", passage).putBoolean("$id.together", together).commit() }
 
     /** The book's speed: its own once set (here or on another device), else the speed last chosen on this watch. */
     fun speed(id: String): Float = prefs.getFloat("$id.speed", prefs.getFloat("speed", 1f))

@@ -9,6 +9,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -24,17 +25,22 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -58,7 +64,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -66,14 +74,20 @@ import androidx.compose.ui.input.rotary.onRotaryScrollEvent
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -84,16 +98,8 @@ import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
 import androidx.wear.compose.foundation.lazy.ScalingLazyListScope
 import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.material3.AppScaffold
-import androidx.wear.compose.material3.Button
-import androidx.wear.compose.material3.ButtonDefaults
-import androidx.wear.compose.material3.CircularProgressIndicator
 import androidx.wear.compose.material3.ColorScheme
-import androidx.wear.compose.material3.CompactButton
-import androidx.wear.compose.material3.FilledIconButton
-import androidx.wear.compose.material3.FilledTonalButton
 import androidx.wear.compose.material3.Icon
-import androidx.wear.compose.material3.IconButton
-import androidx.wear.compose.material3.ListHeader
 import androidx.wear.compose.material3.MaterialTheme
 import androidx.wear.compose.material3.ScreenScaffold
 import androidx.wear.compose.material3.Text
@@ -122,17 +128,22 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-// The Unison look at night, which is the only light a watch has: black glass, cream text, teal for what is live.
+// The Unison look at night, which is the only light a watch has: black glass, cream text, deep-blue surfaces, teal for
+// what is live and for the one thing to press. Titles are set in Literata, as they are on the phone and the web.
 private val Teal = Color(0xFF00B7BC)
 private val Cream = Color(0xFFF3EEDF)
 private val Muted = Color(0xFFA6B4BE)
 private val DeepBlue = Color(0xFF062F47)
+private val Surface = Color(0xFF0F2D40)
+private val SurfaceHigh = Color(0xFF173B4D)
+private val Danger = Color(0xFFF0A090)
 private val UnisonColors = ColorScheme(
     primary = Teal, primaryDim = Color(0xFF0A8F93), primaryContainer = Color(0xFF125657), onPrimary = DeepBlue, onPrimaryContainer = Cream,
-    secondary = Cream, secondaryDim = Muted, secondaryContainer = Color(0xFF173B4D), onSecondary = DeepBlue, onSecondaryContainer = Cream,
-    surfaceContainerLow = Color(0xFF0B2231), surfaceContainer = Color(0xFF0F2D40), surfaceContainerHigh = Color(0xFF173B4D),
+    secondary = Cream, secondaryDim = Muted, secondaryContainer = SurfaceHigh, onSecondary = DeepBlue, onSecondaryContainer = Cream,
+    surfaceContainerLow = Color(0xFF0B2231), surfaceContainer = Surface, surfaceContainerHigh = SurfaceHigh,
     onSurface = Cream, onSurfaceVariant = Muted, background = Color.Black, onBackground = Cream,
 )
+private val Literata = FontFamily(Font(R.font.literata_regular, FontWeight.Normal), Font(R.font.literata_semibold, FontWeight.SemiBold))
 
 /** Work that must finish whatever screen is showing: asking the server, sending a place. */
 private val background = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -158,7 +169,7 @@ private fun UnisonWatch() {
                 composable("output/{id}") { OutputScreen(it.arguments?.getString("id").orEmpty(), nav) }
                 composable("player/{id}") { PlayerScreen(store, it.arguments?.getString("id").orEmpty(), nav) }
                 composable("chapters/{id}") { ChaptersScreen(store, it.arguments?.getString("id").orEmpty(), nav) }
-                composable("speed/{id}") { SpeedScreen(store, it.arguments?.getString("id").orEmpty(), nav) }
+                composable("speed/{id}") { SpeedScreen(store, it.arguments?.getString("id").orEmpty()) }
                 composable("volume") { VolumeScreen() }
                 composable("settings") { SettingsScreen(store, nav) }
                 composable("signout") { SignOutScreen(store, nav) }
@@ -167,7 +178,7 @@ private fun UnisonWatch() {
     }
 }
 
-// ---------------------------------------------------------------- small pieces
+// ---------------------------------------------------------------- the pieces every screen is made of
 
 /** Runs `block` now and every `ms` while the screen is in view. */
 @Composable
@@ -177,23 +188,67 @@ private fun Every(ms: Long, block: () -> Unit) {
     LaunchedEffect(owner, ms) { owner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { while (true) { current(); delay(ms) } } }
 }
 
-/** A list page: the standard scrolling column of a watch, with the time above it. */
+/** A list page: the scrolling column of a watch, starting at its heading under the time. */
 @Composable
 private fun Page(first: Int = 0, content: ScalingLazyListScope.() -> Unit) {
     val state = rememberScalingLazyListState(initialCenterItemIndex = first)
     ScreenScaffold(scrollState = state) { padding ->
-        // A page starts at its heading, under the time, rather than with the heading in the middle of the glass.
-        ScalingLazyColumn(state = state, contentPadding = padding, autoCentering = null, modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, content = content)
+        ScalingLazyColumn(state = state, contentPadding = padding, autoCentering = null, modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
     }
 }
 
+/** A page's heading: small, spaced capitals, as on the phone. */
 @Composable
-private fun Note(text: String, color: Color = MaterialTheme.colorScheme.onSurfaceVariant) =
-    Text(text, style = MaterialTheme.typography.bodySmall, color = color, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp))
+private fun Heading(text: String, color: Color = Muted) =
+    Text(text.uppercase(), fontSize = 10.sp, letterSpacing = 0.14.em, fontWeight = FontWeight.Medium, color = color, textAlign = TextAlign.Center, maxLines = 1, modifier = Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 2.dp))
+
+@Composable
+private fun Note(text: String, color: Color = Muted) =
+    Text(text, fontSize = 12.sp, lineHeight = 16.sp, color = color, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp))
+
+private enum class Tone { Plain, Primary, Quiet }
+
+/**
+ * A row to press: an icon or a cover, a line of words and a smaller one under it, in one rounded shape. The one thing
+ * a screen is for is `Primary` (teal); the rest are `Plain`; `Quiet` has no shape at all. `progress` draws a thin
+ * line along the bottom (a download on its way, how far through a book).
+ */
+@Composable
+private fun Tile(
+    label: String, modifier: Modifier = Modifier, sub: String? = null, icon: Int? = null, cover: ImageBitmap? = null, trailing: String? = null,
+    tone: Tone = Tone.Plain, serif: Boolean = false, progress: Float? = null, enabled: Boolean = true, lines: Int = 1, onClick: (() -> Unit)? = null,
+) {
+    val ink = when (tone) { Tone.Primary -> DeepBlue; else -> Cream }
+    val soft = when (tone) { Tone.Primary -> DeepBlue.copy(alpha = .78f); else -> Muted }
+    val fill = when (tone) { Tone.Primary -> Teal; Tone.Plain -> Surface; Tone.Quiet -> Color.Transparent }
+    Box(
+        modifier.fillMaxWidth().heightIn(min = 46.dp).clip(RoundedCornerShape(23.dp)).background(if (enabled) fill else fill.copy(alpha = .55f))
+            .then(if (onClick != null && enabled) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier),
+    ) {
+        Row(Modifier.fillMaxWidth().padding(start = if (cover != null) 8.dp else 14.dp, end = 14.dp, top = 7.dp, bottom = 7.dp).align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
+            if (cover != null) { Image(cover, null, contentScale = ContentScale.Crop, modifier = Modifier.size(34.dp).clip(RoundedCornerShape(7.dp))); Spacer(Modifier.width(9.dp)) }
+            else if (icon != null) { Icon(painterResource(icon), null, tint = if (tone == Tone.Primary) DeepBlue else Teal, modifier = Modifier.size(20.dp)); Spacer(Modifier.width(10.dp)) }
+            Column(Modifier.weight(1f)) {
+                Text(label, color = ink, fontSize = 14.sp, lineHeight = 17.sp, fontFamily = if (serif) Literata else null, fontWeight = if (tone == Tone.Primary) FontWeight.SemiBold else FontWeight.Normal, maxLines = lines, overflow = TextOverflow.Ellipsis)
+                if (sub != null) Text(sub, color = soft, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (trailing != null) { Spacer(Modifier.width(8.dp)); Text(trailing, color = soft, fontSize = 11.sp, maxLines = 1) }
+        }
+        if (progress != null) Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(progress.coerceIn(0f, 1f)).height(3.dp).background(if (tone == Tone.Primary) DeepBlue else Teal))
+    }
+}
+
+/** A round button with one icon (or a word or two) in it. */
+@Composable
+private fun Round(label: String, size: Dp = 44.dp, icon: Int? = null, text: String? = null, filled: Boolean = false, onClick: () -> Unit) =
+    Box(Modifier.size(size).clip(CircleShape).background(if (filled) Teal else Surface).clickable(role = Role.Button, onClick = onClick).semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+        if (icon != null) Icon(painterResource(icon), null, tint = if (filled) DeepBlue else Cream, modifier = Modifier.size(size * .46f))
+        else if (text != null) Text(text, color = if (filled) DeepBlue else Cream, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+    }
 
 /** A ring turning round something that was pressed and is on its way. */
 @Composable
-private fun Ring(modifier: Modifier, color: Color = MaterialTheme.colorScheme.onSurface) {
+private fun Turning(modifier: Modifier, color: Color = Cream) {
     val turn by rememberInfiniteTransition(label = "ring").animateFloat(0f, 360f, infiniteRepeatable(tween(1000, easing = LinearEasing), RepeatMode.Restart), label = "turn")
     Canvas(modifier) {
         val stroke = 3.dp.toPx()
@@ -201,11 +256,33 @@ private fun Ring(modifier: Modifier, color: Color = MaterialTheme.colorScheme.on
     }
 }
 
-/** A skip button's face: the turning arrow with its seconds inside. */
+/** How far through something, as a ring: a faint whole circle and the part that is done, from the top. */
 @Composable
-private fun Skip(icon: Int, seconds: String, label: String) = Box(contentAlignment = Alignment.Center) {
-    Icon(painterResource(icon), label, modifier = Modifier.size(34.dp))
-    Text(seconds, fontSize = 9.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 3.dp))
+private fun Progress(fraction: Float, modifier: Modifier, stroke: Dp = 3.dp, color: Color = Teal, track: Color = SurfaceHigh) = Canvas(modifier) {
+    val w = stroke.toPx()
+    val box = Size(size.width - w, size.height - w)
+    drawArc(track, 0f, 360f, false, topLeft = Offset(w / 2, w / 2), size = box, style = Stroke(w))
+    drawArc(color, -90f, 360f * fraction.coerceIn(0f, 1f), false, topLeft = Offset(w / 2, w / 2), size = box, style = Stroke(w, cap = StrokeCap.Round))
+}
+
+/** A book's cover from the watch's own copy, decoded off the main thread at about the size it is shown; null while it loads or when there is none. */
+@Composable
+private fun cover(store: Store, id: String, px: Int): ImageBitmap? {
+    val loaded by produceState<ImageBitmap?>(Covers.cached(id, px), id, px) {
+        if (value == null) value = withContext(Dispatchers.IO) { Covers.load(store, id, px) }
+    }
+    return loaded
+}
+
+private object Covers {
+    private val cache = HashMap<String, ImageBitmap>()
+    fun cached(id: String, px: Int): ImageBitmap? = synchronized(cache) { cache["$id@$px"] }
+    fun load(store: Store, id: String, px: Int): ImageBitmap? = runCatching {
+        val file = store.cover(id).takeIf { it.isFile } ?: return null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeFile(file.path, bounds)
+        var sample = 1; while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= px) sample *= 2
+        BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()?.also { synchronized(cache) { if (cache.size > 24) cache.clear(); cache["$id@$px"] = it } }
+    }.getOrNull()
 }
 
 private fun clock(ms: Long): String { val s = ms.coerceAtLeast(0) / 1000; return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s % 3600 / 60, s % 60) else "%d:%02d".format(s / 60, s % 60) }
@@ -214,6 +291,15 @@ private fun left(b: WatchBook, position: Long, speed: Float) = if (position >= b
 private fun megabytes(bytes: Long) = if (bytes >= 1_000_000_000) "%.1f GB".format(bytes / 1e9) else "${(bytes + 500_000) / 1_000_000} MB"
 private fun speedText(v: Float) = (if (v == v.toInt().toFloat()) "${v.toInt()}.0" else v.toString()) + "×"
 private fun host(url: String) = url.trim().removePrefix("https://").removePrefix("http://").trimEnd('/')
+private fun fraction(b: WatchBook, position: Long) = if (b.duration > 0) (position.toFloat() / b.duration).coerceIn(0f, 1f) else 0f
+
+/** A chapter's name as a person would say it: many audiobooks call their chapters "031" or leave them blank. */
+private fun chapterName(b: WatchBook, index: Int): String {
+    val raw = b.chapters.getOrNull(index)?.title?.trim().orEmpty()
+    return when { raw.isBlank() -> "Chapter ${index + 1}"; raw.all { it.isDigit() } -> "Chapter ${raw.toLongOrNull() ?: raw}"; else -> raw }
+}
+private fun chapterIndex(b: WatchBook, position: Long) = b.chapters.indexOfLast { it.start <= position }
+private fun chapterNow(b: WatchBook, position: Long): String? = chapterIndex(b, position).takeIf { it >= 0 }?.let { chapterName(b, it) }
 
 private val HEADPHONES = setOf(
     AudioDeviceInfo.TYPE_BLUETOOTH_A2DP, AudioDeviceInfo.TYPE_BLE_HEADSET, AudioDeviceInfo.TYPE_BLE_SPEAKER, AudioDeviceInfo.TYPE_BLE_BROADCAST,
@@ -223,11 +309,55 @@ private fun outputs(context: Context) = context.getSystemService(AudioManager::c
 private fun headphones(context: Context) = outputs(context).any { it.type in HEADPHONES }
 private fun speaker(context: Context) = outputs(context).any { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
 
-/** Starts the book, by way of the headphones question when nothing is connected to hear it through. */
+/** Starts the book, by way of the headphones question when nothing is connected to hear it through. The questions on the way leave the stack, so Back from the player is where listening was asked for. */
 private fun play(context: Context, nav: NavHostController, id: String, position: Long = -1) {
-    if (!headphones(context) && !speakerChosen) { nav.navigate("output/$id") { popUpTo("book/{id}") }; return }
+    val here = nav.currentDestination?.route
+    if (!headphones(context) && !speakerChosen) {
+        if (here == "places/{id}") nav.popBackStack()
+        nav.navigate("output/$id")
+        return
+    }
     PlaybackService.send(context, "play", id, position)
-    if (nav.currentDestination?.route != "player/{id}") nav.navigate("player/$id") { popUpTo("book/{id}") }
+    if (here == "output/{id}" || here == "places/{id}") nav.popBackStack()
+    if (here != "player/{id}") nav.navigate("player/$id")
+}
+
+/**
+ * The way into listening, from the shelf or a book's page. The newest place comes first, from whichever device left it:
+ * the server gets two and a half seconds, then the book opens as it is here. A place far from this watch's becomes the
+ * question (Two places); an answer that comes after the book has started never moves it.
+ */
+private class Listening(private val context: Context, private val store: Store, private val nav: NavHostController, private val scope: CoroutineScope) {
+    var opening by mutableStateOf<String?>(null)
+        private set
+
+    fun start(id: String) {
+        if (opening != null) return
+        if (PlaybackService.playingBook() == id && (PlaybackService.playing() || PlaybackService.starting(id))) { nav.navigate("player/$id"); return }
+        if (store.elsewhere(id) != null) { nav.navigate("places/$id"); return }
+        opening = id
+        scope.launch {
+            val asked = background.async { Sync.pull(context, id) }
+            val pulled = withTimeoutOrNull(2500) { asked.await() }
+            opening = null
+            when (pulled) {
+                is Sync.Pulled.Newer -> { Sync.take(context, id, pulled.audio, pulled.passage, pulled.updated); play(context, nav, id) }
+                is Sync.Pulled.Apart -> { store.elsewhere(id, pulled.audio, pulled.passage, pulled.updated, pulled.by); nav.navigate("places/$id") }
+                is Sync.Pulled.Nothing -> play(context, nav, id)
+                null -> {
+                    play(context, nav, id)
+                    background.launch { (asked.await() as? Sync.Pulled.Apart)?.let { store.elsewhere(id, it.audio, it.passage, it.updated, it.by) } }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberListening(store: Store, nav: NavHostController): Listening {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    return remember(nav) { Listening(context, store, nav, scope) }
 }
 
 // ---------------------------------------------------------------- signing in
@@ -256,12 +386,12 @@ private fun LinkScreen(store: Store, server: String, signedIn: () -> Unit, chang
         val client = ServerClient(server, "", store.deviceId)
         val started = withContext(Dispatchers.IO) { runCatching { client.linkStart(Build.MODEL.orEmpty().ifBlank { "Wear OS watch" }) } }.getOrElse { e ->
             val m = e.message.orEmpty()
-            phase = Link.Failed(when { m.startsWith("Server answered 404") || m.startsWith("Server answered 401") -> "This server needs an update before a watch can sign in.";m.startsWith("Server answered") && ": " in m -> m.substringAfter(": "); else -> "Could not reach ${host(server)}." })
+            phase = Link.Failed(when { m.startsWith("Server answered 404") || m.startsWith("Server answered 401") -> "This server needs an update before a watch can sign in."; m.startsWith("Server answered") && ": " in m -> m.substringAfter(": "); else -> "Could not reach ${host(server)}." })
             return@LaunchedEffect
         }
         phase = Link.Code(started.code)
-        val until = android.os.SystemClock.elapsedRealtime() + 11 * 60_000
-        while (android.os.SystemClock.elapsedRealtime() < until) {
+        val until = SystemClock.elapsedRealtime() + 11 * 60_000
+        while (SystemClock.elapsedRealtime() < until) {
             delay(started.poll * 1000L)
             val answer = withContext(Dispatchers.IO) { runCatching { client.linkClaim(started.secret) } }
             // The code ended, or was used: a new one is needed. Anything else is a moment without a connection.
@@ -278,18 +408,18 @@ private fun LinkScreen(store: Store, server: String, signedIn: () -> Unit, chang
         onDispose { window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
     Page {
-        item { ListHeader { Text("Wear OS sign-in") } }
+        item { Heading("Wear OS sign-in") }
         when (val p = phase) {
             is Link.Asking -> item { Note("Asking ${host(server)} for a code…") }
             is Link.NoServer -> item { Note("Which server is your library on?") }
             is Link.Code -> {
-                item { Text(p.code.take(3) + " " + p.code.drop(3), style = MaterialTheme.typography.displayMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.semantics { contentDescription = "Code " + p.code }) }
-                item { Note("In Unison on your phone, open Settings, then Wear OS sign-in, and type this code.") }
+                item { Text(p.code.take(3) + " " + p.code.drop(3), fontSize = 38.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.02.em, color = Teal, modifier = Modifier.semantics { contentDescription = "Code " + p.code }) }
+                item { Note("In Unison on your phone, open Settings, then Wear OS sign-in, and type this code.", Cream) }
             }
-            is Link.Ended -> { item { Note("That code has ended.") }; item { Button(onClick = { attempt++ }, modifier = Modifier.fillMaxWidth()) { Text("New code") } } }
-            is Link.Failed -> { item { Note(p.why) }; item { Button(onClick = { attempt++ }, modifier = Modifier.fillMaxWidth()) { Text("Try again") } } }
+            is Link.Ended -> { item { Note("That code has ended.") }; item { Tile("New code", tone = Tone.Primary, icon = R.drawable.ic_refresh) { attempt++ } } }
+            is Link.Failed -> { item { Note(p.why) }; item { Tile("Try again", tone = Tone.Primary, icon = R.drawable.ic_refresh) { attempt++ } } }
         }
-        item { FilledTonalButton(onClick = changeServer, modifier = Modifier.fillMaxWidth(), secondaryLabel = { Text(host(server).ifBlank { "Not set" }, maxLines = 1, overflow = TextOverflow.Ellipsis) }) { Text("Server") } }
+        item { Tile("Server", sub = host(server).ifBlank { "Not set" }, onClick = changeServer) }
     }
 }
 
@@ -297,21 +427,20 @@ private fun LinkScreen(store: Store, server: String, signedIn: () -> Unit, chang
 @Composable
 private fun ServerScreen(store: Store, done: () -> Unit) {
     var text by remember { mutableStateOf(host(store.serverUrl)) }
-    val save = { if (text.isNotBlank()) { store.serverUrl = text.trim(); done() } }
     Page {
-        item { ListHeader { Text("Server address") } }
+        item { Heading("Server address") }
         item {
             BasicTextField(
                 value = text, onValueChange = { text = it.filter { c -> !c.isWhitespace() } }, singleLine = true,
-                textStyle = TextStyle(color = Cream, fontSize = 15.sp, textAlign = TextAlign.Center),
+                textStyle = TextStyle(color = Cream, fontSize = 14.sp, textAlign = TextAlign.Center),
                 // The keyboard's own tick only closes the keyboard: what was typed reaches this field after that tick is
                 // handled, so saving there would keep the old address. The button below saves.
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 12.dp, vertical = 12.dp).semantics { contentDescription = "Server address" },
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(23.dp)).background(Surface).padding(horizontal = 14.dp, vertical = 14.dp).semantics { contentDescription = "Server address" },
             )
         }
         item { Note("Like unison.example.org. Tap the field to type.") }
-        item { Button(onClick = save, modifier = Modifier.fillMaxWidth(), enabled = text.isNotBlank()) { Text("Use this server") } }
+        item { Tile("Use this server", tone = Tone.Primary, icon = R.drawable.ic_check, enabled = text.isNotBlank()) { store.serverUrl = text.trim(); done() } }
     }
 }
 
@@ -321,16 +450,15 @@ private fun ServerScreen(store: Store, done: () -> Unit) {
 private fun HomeScreen(store: Store, nav: NavHostController) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val listening = rememberListening(store, nav)
     fun listed(): List<WatchBook> {
         val shelf = store.shelf
-        val all = store.books()
-        // The shelf's own order (what is being read first), books kept on the watch after leaving the shelf last; the book last listened to here leads.
-        return all.sortedWith(compareByDescending<WatchBook> { store.listened(it.id) }.thenBy { b -> shelf.indexOf(b.id).let { if (it < 0) Int.MAX_VALUE else it } })
+        // The book last listened to here leads; then the shelf's own order (what is being read first); books kept on the watch after leaving the shelf last.
+        return store.books().sortedWith(compareByDescending<WatchBook> { store.listened(it.id) }.thenBy { b -> shelf.indexOf(b.id).let { if (it < 0) Int.MAX_VALUE else it } })
     }
     var books by remember { mutableStateOf(listed()) }
     var refreshing by remember { mutableStateOf(false) }
     var reached by remember { mutableStateOf(true) }
-    var playingId by remember { mutableStateOf(PlaybackService.playingBook()) }
     var tick by remember { mutableIntStateOf(0) }
     fun refresh() {
         if (refreshing) return
@@ -343,28 +471,61 @@ private fun HomeScreen(store: Store, nav: NavHostController) {
     }
     val owner = LocalLifecycleOwner.current
     LaunchedEffect(owner) { owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { books = listed(); refresh() } }
-    Every(1000) { playingId = PlaybackService.playingBook(); tick++ }
+    Every(1000) { tick++ }
     // The media notification is how the watch shows its own controls for the book; it needs the person's yes once.
     val ask = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) { if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) ask.launch(Manifest.permission.POST_NOTIFICATIONS) }
+    // The book in the player leads the page, whatever was listened to last.
+    val current = PlaybackService.playingBook()?.let { id -> books.firstOrNull { it.id == id } } ?: books.firstOrNull()
     Page {
-        item { ListHeader { Text("Audiobooks") } }
-        playingId?.let { id -> store.book(id) }?.let { b ->
-            item(key = "now") {
-                Button(onClick = { nav.navigate("player/${b.id}") }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_headphones), null) },
-                    secondaryLabel = { Text(b.title, maxLines = 1, overflow = TextOverflow.Ellipsis) }) { Text(if (PlaybackService.playing()) "Now listening" else "Paused") }
+        item { Heading("Unison") }
+        if (current != null) item(key = "hero") { tick; Hero(store, current, opening = listening.opening == current.id) { listening.start(current.id) } }
+        if (books.isEmpty()) item { Note(if (refreshing) "Fetching your shelf…" else if (!reached) "Could not reach your server." else "No audiobooks on your shelf yet. Put one on your shelf in the phone app or on the web.") }
+        val rest = books.filter { it.id != current?.id }
+        if (rest.isNotEmpty()) item { Heading("On your shelf") }
+        for (b in rest) item(key = b.id) {
+            tick
+            val line = listOfNotNull(left(b, store.audio(b.id), store.speed(b.id)), if (store.downloaded(b)) "on watch" else DownloadService.progress(b.id)?.let { "downloading" }).joinToString("  ·  ")
+            Tile(b.title, sub = line, cover = cover(store, b.id, 96), icon = R.drawable.ic_headphones, serif = true, progress = fraction(b, store.audio(b.id)).takeIf { it > 0f }, lines = 2) { nav.navigate("book/${b.id}") }
+        }
+        if (books.isNotEmpty() && !reached && !refreshing) item { Note("No connection. Books on the watch still play.") }
+        item {
+            Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Box(contentAlignment = Alignment.Center) {
+                    Round("Refresh", icon = R.drawable.ic_refresh) { refresh() }
+                    if (refreshing) Turning(Modifier.size(48.dp), Teal)
+                }
+                Round("Settings", icon = R.drawable.ic_settings) { nav.navigate("settings") }
             }
         }
-        if (books.isEmpty()) item { Note(if (refreshing) "Fetching your shelf…" else if (!reached) "Could not reach your server." else "No audiobooks on your shelf yet. Put one on your shelf in the phone app or on the web.") }
-        for (b in books) item(key = b.id) {
-            tick
-            val onWatch = store.downloaded(b)
-            val line = listOf(left(b, store.audio(b.id), store.speed(b.id)), if (onWatch) "on watch" else DownloadService.progress(b.id)?.let { "downloading" }).filterNotNull().joinToString("  ·  ")
-            FilledTonalButton(onClick = { nav.navigate("book/${b.id}") }, modifier = Modifier.fillMaxWidth(), secondaryLabel = { Text(line, maxLines = 1, overflow = TextOverflow.Ellipsis) }) { Text(b.title, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+    }
+}
+
+/** The book to go on with: its cover behind its name, where it is, and one press to listen. A second, smaller press opens the book's page. */
+@Composable
+private fun Hero(store: Store, b: WatchBook, opening: Boolean, listen: () -> Unit) {
+    val position = store.audio(b.id)
+    val here = PlaybackService.playingBook() == b.id
+    val playing = here && PlaybackService.playing()
+    val art = cover(store, b.id, 300)
+    Box(Modifier.fillMaxWidth().height(92.dp).clip(RoundedCornerShape(26.dp)).background(Surface).clickable(role = Role.Button, onClick = listen).semantics { contentDescription = if (playing) "Now listening" else if (position > 0) "Continue ${b.title}" else "Listen to ${b.title}" }) {
+        if (art != null) {
+            Image(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+            Box(Modifier.fillMaxSize().background(Brush.horizontalGradient(listOf(Color(0xF20B2231), Color(0xB30B2231), Color(0x660B2231)))))
         }
-        if (books.isNotEmpty() && !reached && !refreshing) item { Note("No connection: books on the watch still play.") }
-        item { FilledTonalButton(onClick = { refresh() }, modifier = Modifier.fillMaxWidth(), enabled = !refreshing, icon = { Icon(painterResource(R.drawable.ic_refresh), null) }) { Text(if (refreshing) "Refreshing…" else "Refresh") } }
-        item { FilledTonalButton(onClick = { nav.navigate("settings") }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_settings), null) }) { Text("Settings") } }
+        Row(Modifier.fillMaxSize().padding(start = 16.dp, end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text((if (opening) "Opening" else if (playing) "Now listening" else if (here) "Paused" else if (position > 0) "Continue" else "Listen").uppercase(), color = Teal, fontSize = 9.sp, letterSpacing = 0.14.em, fontWeight = FontWeight.Medium, maxLines = 1)
+                Text(b.title, color = Cream, fontFamily = Literata, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(listOfNotNull(chapterNow(b, position).takeIf { position > 0 }, left(b, position, store.speed(b.id))).joinToString("  ·  "), color = Cream.copy(alpha = .78f), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.width(8.dp))
+            Box(contentAlignment = Alignment.Center) {
+                Box(Modifier.size(38.dp).clip(CircleShape).background(Teal), contentAlignment = Alignment.Center) { Icon(painterResource(if (playing) R.drawable.ic_headphones else R.drawable.ic_play), null, tint = DeepBlue, modifier = Modifier.size(18.dp)) }
+                if (opening) Turning(Modifier.size(44.dp))
+            }
+        }
+        Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(fraction(b, position)).height(3.dp).background(Teal))
     }
 }
 
@@ -373,65 +534,45 @@ private fun HomeScreen(store: Store, nav: NavHostController) {
 @Composable
 private fun BookScreen(store: Store, id: String, nav: NavHostController) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
+    val listening = rememberListening(store, nav)
     val book = remember(id) { store.book(id) }
     if (book == null) { Page { item { Note("This book is no longer on the watch.") } }; return }
     var tick by remember { mutableIntStateOf(0) }
-    var opening by remember { mutableStateOf(false) }
     var problem by remember { mutableStateOf<String?>(null) }
     Every(500) { tick++; DownloadService.takeProblem(id)?.let { problem = it } }
     // The speed may have been changed on another device; it is here by the time Listen is pressed.
     LaunchedEffect(id) { withContext(Dispatchers.IO) { runCatching { Sync.pullSpeed(context, id) } } }
-    fun listen() {
-        if (opening) return
-        if (PlaybackService.playingBook() == id && (PlaybackService.playing() || PlaybackService.starting(id))) { nav.navigate("player/$id"); return }
-        if (store.elsewhere(id) != null) { nav.navigate("places/$id"); return }
-        opening = true
-        scope.launch {
-            // The newest place, from whichever device left it: the server gets two and a half seconds, then the book opens as it is here.
-            val asked = background.async { Sync.pull(context, id) }
-            val pulled = withTimeoutOrNull(2500) { asked.await() }
-            opening = false
-            when (pulled) {
-                is Sync.Pulled.Newer -> { Sync.take(context, id, pulled.audio, pulled.updated); play(context, nav, id) }
-                is Sync.Pulled.Apart -> { store.elsewhere(id, pulled.audio, pulled.updated, pulled.by); nav.navigate("places/$id") }
-                is Sync.Pulled.Nothing -> play(context, nav, id)
-                null -> {
-                    play(context, nav, id)
-                    // An answer that comes after the book has started never moves it: far from here, it becomes the question next time.
-                    background.launch { (asked.await() as? Sync.Pulled.Apart)?.let { store.elsewhere(id, it.audio, it.updated, it.by) } }
-                }
-            }
-        }
-    }
+    val art = cover(store, id, 220)
     Page {
-        item { Text(book.title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) }
-        item { tick; Note(listOfNotNull(book.author.takeIf { it.isNotBlank() }, left(book, store.audio(id), store.speed(id))).joinToString("  ·  ")) }
+        if (art != null) item { Image(art, "Cover of ${book.title}", contentScale = ContentScale.Crop, modifier = Modifier.size(64.dp).clip(RoundedCornerShape(10.dp))) }
+        item { Text(book.title, color = Cream, fontFamily = Literata, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, lineHeight = 19.sp, textAlign = TextAlign.Center, maxLines = 3, overflow = TextOverflow.Ellipsis, modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp)) }
+        if (book.author.isNotBlank()) item { Note(book.author) }
         item {
             tick
+            val position = store.audio(id)
             val here = PlaybackService.playingBook() == id && (PlaybackService.playing() || PlaybackService.starting(id))
-            Button(onClick = { listen() }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(if (here) R.drawable.ic_headphones else R.drawable.ic_play), null) }) {
-                Text(if (opening) "Opening…" else if (here) "Now listening" else if (store.audio(id) > 0) "Continue" else "Listen")
-            }
+            val opening = listening.opening == id
+            Tile(
+                if (opening) "Opening…" else if (here) "Now listening" else if (position > 0) "Continue" else "Listen",
+                sub = listOfNotNull(chapterNow(book, position).takeIf { position > 0 }, left(book, position, store.speed(id))).joinToString("  ·  "),
+                icon = if (here) R.drawable.ic_headphones else R.drawable.ic_play, tone = Tone.Primary, progress = fraction(book, position).takeIf { it > 0f },
+            ) { listening.start(id) }
         }
         item {
             tick
             val progress = DownloadService.progress(id)
             when {
-                progress != null -> FilledTonalButton(onClick = { DownloadService.cancel(context, id) }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_close), null) },
-                    secondaryLabel = { Text("Tap to stop") }) { Text(if (progress < 0) "Waiting to download" else "Downloading ${(progress * 100).toInt()}%") }
-                store.downloaded(book) -> FilledTonalButton(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_check), null) },
-                    secondaryLabel = { Text(megabytes(store.audioBytes(id))) }) { Text("On this watch") }
-                else -> FilledTonalButton(onClick = { problem = null; DownloadService.start(context, id) }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_download), null) },
-                    secondaryLabel = { Text(if (store.audioBytes(id) > 0) "Goes on where it stopped" else "Listen offline") }) { Text("Download") }
+                progress != null -> Tile(if (progress < 0) "Waiting to download" else "Downloading ${(progress * 100).toInt()}%", sub = "Tap to stop", icon = R.drawable.ic_close, progress = progress.coerceAtLeast(0f)) { DownloadService.cancel(context, id) }
+                store.downloaded(book) -> Tile("On this watch", sub = megabytes(store.audioBytes(id)) + "  ·  plays offline", icon = R.drawable.ic_check)
+                else -> Tile("Download", sub = if (store.audioBytes(id) > 0) "Goes on where it stopped" else "Listen offline", icon = R.drawable.ic_download) { problem = null; DownloadService.start(context, id) }
             }
         }
-        problem?.let { item { Note(it, MaterialTheme.colorScheme.error) } }
-        if (book.chapters.size > 1) item { FilledTonalButton(onClick = { nav.navigate("chapters/$id") }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_chapters), null) }) { Text("Chapters") } }
+        problem?.let { item { Note(it, Danger) } }
+        if (book.chapters.size > 1) item { tick; Tile("Chapters", sub = "${book.chapters.size} in this book", icon = R.drawable.ic_chapters) { nav.navigate("chapters/$id") } }
         item {
             tick
             if (store.audioBytes(id) > 0 && DownloadService.progress(id) == null && PlaybackService.playingBook() != id)
-                FilledTonalButton(onClick = { store.removeAudio(id); tick++ }, modifier = Modifier.fillMaxWidth(), secondaryLabel = { Text("The book stays on your shelf") }) { Text("Remove download") }
+                Tile("Remove download", sub = "The book stays on your shelf", icon = R.drawable.ic_trash, tone = Tone.Quiet) { store.removeAudio(id); tick++ }
         }
     }
 }
@@ -443,18 +584,13 @@ private fun PlacesScreen(store: Store, id: String, nav: NavHostController) {
     val book = remember(id) { store.book(id) }
     val there = remember(id) { store.elsewhere(id) }
     if (book == null || there == null) { LaunchedEffect(Unit) { nav.popBackStack() }; return }
-    fun where(position: Long) = listOfNotNull(book.chapterAt(position)?.title?.trim()?.takeIf { it.isNotBlank() }, clock(position)).joinToString(", ")
+    fun where(position: Long) = listOfNotNull(chapterNow(book, position), clock(position)).joinToString(", ")
     Page {
-        item { ListHeader { Text("Two places") } }
-        item { Note("${book.title} was left in two places.") }
-        item {
-            Button(onClick = { Sync.take(context, id, there.first, there.second); play(context, nav, id) }, modifier = Modifier.fillMaxWidth(),
-                secondaryLabel = { Text(listOfNotNull(there.third.takeIf { it.isNotBlank() }, where(there.first)).joinToString(": "), maxLines = 2, overflow = TextOverflow.Ellipsis) }) { Text("Go there") }
-        }
-        item {
-            FilledTonalButton(onClick = { store.clearElsewhere(id); background.launch { runCatching { Sync.push(context, id, force = true) } }; play(context, nav, id) }, modifier = Modifier.fillMaxWidth(),
-                secondaryLabel = { Text("This watch: " + where(store.audio(id)), maxLines = 2, overflow = TextOverflow.Ellipsis) }) { Text("Stay here") }
-        }
+        item { Heading("Two places") }
+        item { Note("${book.title} was left in two places.", Cream) }
+        item { Tile("Go there", sub = where(there.audio), trailing = there.by.takeIf { it.isNotBlank() && it.length <= 12 }, tone = Tone.Primary) { Sync.take(context, id, there.audio, there.passage, there.updated); play(context, nav, id) } }
+        if (there.by.length > 12) item { Note("Left there by ${there.by}") }
+        item { Tile("Stay here", sub = where(store.audio(id)), trailing = "this watch") { store.clearElsewhere(id); background.launch { runCatching { Sync.push(context, id, force = true) } }; play(context, nav, id) } }
     }
 }
 
@@ -464,15 +600,15 @@ private fun OutputScreen(id: String, nav: NavHostController) {
     val context = LocalContext.current
     Every(1000) { if (headphones(context)) play(context, nav, id) }
     Page {
-        item { ListHeader { Text("No headphones") } }
-        item { Note("Nothing is connected to listen through.") }
+        item { Heading("No headphones") }
+        item { Note("Nothing is connected to listen through.", Cream) }
         item {
-            Button(onClick = {
+            Tile("Connect headphones", icon = R.drawable.ic_headphones, tone = Tone.Primary) {
                 // The watch's own Bluetooth page, which closes by itself once something connects.
                 runCatching { context.startActivity(Intent(Settings.ACTION_BLUETOOTH_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK).putExtra("EXTRA_CONNECTION_ONLY", true).putExtra("EXTRA_CLOSE_ON_CONNECT", true).putExtra("android.bluetooth.devicepicker.extra.FILTER_TYPE", 1)) }
-            }, modifier = Modifier.fillMaxWidth(), icon = { Icon(painterResource(R.drawable.ic_headphones), null) }) { Text("Connect headphones") }
+            }
         }
-        if (speaker(context)) item { FilledTonalButton(onClick = { speakerChosen = true; play(context, nav, id) }, modifier = Modifier.fillMaxWidth()) { Text("Play on the watch") } }
+        if (speaker(context)) item { Tile("Play on the watch", icon = R.drawable.ic_volume) { speakerChosen = true; play(context, nav, id) } }
     }
 }
 
@@ -501,20 +637,16 @@ private fun PlayerScreen(store: Store, id: String, nav: NavHostController) {
     Every(500) { look() }
     val scope = rememberCoroutineScope()
     fun send(command: String) { PlaybackService.send(context, command, id); look(); scope.launch { delay(200); look() } }
-    val cover by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, id) {
-        value = withContext(Dispatchers.IO) {
-            runCatching {
-                val file = store.cover(id).takeIf { it.isFile } ?: return@runCatching null
-                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }; BitmapFactory.decodeFile(file.path, bounds)
-                var sample = 1; while (maxOf(bounds.outWidth, bounds.outHeight) / (sample * 2) >= 400) sample *= 2
-                BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
-            }.getOrNull()
-        }
-    }
+    val art = cover(store, id, 420)
     // The crown is the volume while the book's own screen shows.
     val focus = remember { FocusRequester() }
     var turned by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    // How far through the chapter, for the ring round the play button; through the book when it has no chapters.
+    val index = chapterIndex(book, now)
+    val chapterStart = book.chapters.getOrNull(index)?.start ?: 0L
+    val chapterEnd = book.chapters.getOrNull(index + 1)?.start ?: book.duration
+    val within = if (chapterEnd > chapterStart) ((now - chapterStart).toFloat() / (chapterEnd - chapterStart)).coerceIn(0f, 1f) else 0f
     ScreenScaffold {
         Box(
             Modifier.fillMaxSize().onRotaryScrollEvent { e ->
@@ -522,41 +654,53 @@ private fun PlayerScreen(store: Store, id: String, nav: NavHostController) {
                 while (kotlin.math.abs(turned) >= 48f) {
                     audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, if (turned > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER, 0)
                     turned -= if (turned > 0) 48f else -48f
-                    volumeShown = android.os.SystemClock.elapsedRealtime()
+                    volumeShown = SystemClock.elapsedRealtime()
                 }
                 true
             }.focusRequester(focus).focusable(),
             contentAlignment = Alignment.Center,
         ) {
-            cover?.let { Image(it, null, contentScale = ContentScale.Crop, alpha = .22f, modifier = Modifier.fillMaxSize()) }
-            CircularProgressIndicator(progress = { if (book.duration > 0) (now.toFloat() / book.duration).coerceIn(0f, 1f) else 0f }, modifier = Modifier.fillMaxSize().padding(2.dp), strokeWidth = 4.dp)
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp)) {
-                Text(book.chapterAt(now)?.title?.trim()?.takeIf { it.isNotBlank() } ?: book.title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
-                val showVolume = android.os.SystemClock.elapsedRealtime() - volumeShown < 1500
+            if (art != null) {
+                Image(art, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0xE6000000), Color(0xC7061722), Color(0xF2000000)))))
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)) {
+                Text(if (index >= 0) chapterName(book, index) else book.title, color = Cream, fontFamily = Literata, fontWeight = FontWeight.SemiBold, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                val showVolume = SystemClock.elapsedRealtime() - volumeShown < 1500
                 Text(
                     said ?: if (showVolume) "Volume ${audio.getStreamVolume(AudioManager.STREAM_MUSIC)} of ${audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC)}" else left(book, now, speed),
-                    style = MaterialTheme.typography.bodySmall, color = if (said != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                    color = if (said != null) Danger else Muted, fontSize = 11.sp, lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(4.dp))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    IconButton(onClick = { send("back") }) { Skip(R.drawable.ic_back15, "15", "Back 15 seconds") }
+                Spacer(Modifier.height(5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Skip(R.drawable.ic_back15, "15", "Back 15 seconds") { send("back") }
                     Box(contentAlignment = Alignment.Center) {
-                        // Pause shows on the press itself, with a ring turning round it until the sound comes.
-                        FilledIconButton(onClick = { send("toggle") }, modifier = Modifier.size(58.dp)) { Icon(painterResource(if (playing || starting) R.drawable.ic_pause else R.drawable.ic_play), if (playing || starting) "Pause audiobook" else "Play audiobook") }
-                        if (starting) Ring(Modifier.size(66.dp))
+                        // Pause shows on the press itself; the ring is the chapter, and turns while the sound is on its way.
+                        if (starting) Turning(Modifier.size(70.dp)) else Progress(within, Modifier.size(70.dp))
+                        Box(Modifier.size(56.dp).clip(CircleShape).background(Teal).clickable(role = Role.Button) { send("toggle") }.semantics { contentDescription = if (playing || starting) "Pause audiobook" else "Play audiobook" }, contentAlignment = Alignment.Center) {
+                            Icon(painterResource(if (playing || starting) R.drawable.ic_pause else R.drawable.ic_play), null, tint = DeepBlue, modifier = Modifier.size(24.dp))
+                        }
                     }
-                    IconButton(onClick = { send("forward") }) { Skip(R.drawable.ic_forward30, "30", "Forward 30 seconds") }
+                    Skip(R.drawable.ic_forward30, "30", "Forward 30 seconds") { send("forward") }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    CompactButton(onClick = { nav.navigate("speed/$id") }, colors = ButtonDefaults.filledTonalButtonColors(), label = { Text(speedText(speed)) })
-                    if (book.chapters.size > 1) IconButton(onClick = { nav.navigate("chapters/$id") }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_chapters), "Chapters") }
-                    IconButton(onClick = { nav.navigate("volume") }, modifier = Modifier.size(40.dp)) { Icon(painterResource(R.drawable.ic_volume_up), "Volume") }
+                Spacer(Modifier.height(5.dp))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (book.chapters.size > 1) Round("Chapters", size = 38.dp, icon = R.drawable.ic_chapters) { nav.navigate("chapters/$id") }
+                    Round("Speed", size = 38.dp, text = speedText(speed)) { nav.navigate("speed/$id") }
+                    Round("Volume", size = 38.dp, icon = R.drawable.ic_volume) { nav.navigate("volume") }
                 }
             }
         }
     }
 }
+
+/** A skip button: the turning arrow with its seconds inside. */
+@Composable
+private fun Skip(icon: Int, seconds: String, label: String, onClick: () -> Unit) =
+    Box(Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button, onClick = onClick).semantics { contentDescription = label }, contentAlignment = Alignment.Center) {
+        Icon(painterResource(icon), null, tint = Cream, modifier = Modifier.size(34.dp))
+        Text(seconds, fontSize = 9.sp, fontWeight = FontWeight.Medium, color = Cream, modifier = Modifier.padding(top = 3.dp))
+    }
 
 @Composable
 private fun ChaptersScreen(store: Store, id: String, nav: NavHostController) {
@@ -564,38 +708,59 @@ private fun ChaptersScreen(store: Store, id: String, nav: NavHostController) {
     val book = remember(id) { store.book(id) }
     if (book == null) { LaunchedEffect(Unit) { nav.popBackStack() }; return }
     val position = remember { (if (PlaybackService.playingBook() == id) PlaybackService.livePosition().takeIf { it >= 0 } else null) ?: store.audio(id) }
-    val current = book.chapters.indexOfLast { it.start <= position }
+    val current = chapterIndex(book, position)
     Page(first = (current + 1).coerceAtLeast(0)) {
-        item { ListHeader { Text("Chapters") } }
+        item { Heading("Chapters") }
         for ((i, c) in book.chapters.withIndex()) item(key = i) {
-            val go = {
-                nav.popBackStack()
-                play(context, nav, id, c.start)
+            // One line each: the chapter and when it starts; the one being listened to is marked.
+            Box(Modifier.fillMaxWidth().height(40.dp).clip(RoundedCornerShape(20.dp)).background(if (i == current) Color(0xFF125657) else Surface).clickable(role = Role.Button) { nav.popBackStack(); play(context, nav, id, c.start) }) {
+                Row(Modifier.fillMaxSize().padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (i == current) { Box(Modifier.size(6.dp).clip(CircleShape).background(Teal)); Spacer(Modifier.width(8.dp)) }
+                    Text(chapterName(book, i), color = Cream, fontSize = 13.sp, fontWeight = if (i == current) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                    Spacer(Modifier.width(8.dp))
+                    Text(clock(c.start), color = if (i == current) Cream.copy(alpha = .8f) else Muted, fontSize = 11.sp, maxLines = 1)
+                }
             }
-            val label: @Composable () -> Unit = { Text(c.title.trim().ifBlank { "Chapter ${i + 1}" }, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-            if (i == current) Button(onClick = go, modifier = Modifier.fillMaxWidth(), secondaryLabel = { Text(clock(c.start)) }) { label() }
-            else FilledTonalButton(onClick = go, modifier = Modifier.fillMaxWidth(), secondaryLabel = { Text(clock(c.start)) }) { label() }
         }
     }
 }
 
-/** The book's own speed, kept on the server so the phone and the web play it at the same speed. */
+private val SPEEDS = listOf(.75f, .8f, 1f, 1.1f, 1.2f, 1.25f, 1.5f, 1.75f, 2f)
+
+/** The book's own speed, kept on the server so the phone and the web play it at the same speed: one step slower or faster at a press, or with the crown. */
 @Composable
-private fun SpeedScreen(store: Store, id: String, nav: NavHostController) {
+private fun SpeedScreen(store: Store, id: String) {
     val context = LocalContext.current
-    val speeds = listOf(.75f, .8f, 1f, 1.1f, 1.2f, 1.25f, 1.5f, 1.75f, 2f)
-    val now = store.speed(id)
-    Page(first = speeds.indexOfFirst { it == now }.coerceAtLeast(0) + 1) {
-        item { ListHeader { Text("Speed") } }
-        for (v in speeds) item(key = v) {
-            val choose = {
-                store.speed(id, v, local = true)
-                if (PlaybackService.playingBook() == id) PlaybackService.send(context, "speed", id)
-                background.launch { runCatching { Sync.settle(context) } }
-                nav.popBackStack(); Unit
+    var speed by remember { mutableFloatStateOf(store.speed(id)) }
+    fun step(by: Int) {
+        val at = SPEEDS.indexOfFirst { it >= speed - .001f }.let { if (it < 0) SPEEDS.lastIndex else it }
+        val next = SPEEDS[(at + by).coerceIn(0, SPEEDS.lastIndex)]
+        if (next == speed) return
+        speed = next
+        store.speed(id, next, local = true)
+        if (PlaybackService.playingBook() == id) PlaybackService.send(context, "speed", id)
+    }
+    // Sent once, when the screen is left, rather than at every step on the way to the speed wanted.
+    DisposableEffect(Unit) { onDispose { background.launch { runCatching { Sync.settle(context) } } } }
+    val focus = remember { FocusRequester() }
+    var turned by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
+    ScreenScaffold {
+        Box(Modifier.fillMaxSize().onRotaryScrollEvent { e ->
+            turned += e.verticalScrollPixels
+            while (kotlin.math.abs(turned) >= 64f) { step(if (turned > 0) 1 else -1); turned -= if (turned > 0) 64f else -64f }
+            true
+        }.focusRequester(focus).focusable(), contentAlignment = Alignment.Center) {
+            Progress((SPEEDS.indexOf(speed).coerceAtLeast(0)).toFloat() / SPEEDS.lastIndex, Modifier.fillMaxSize().padding(5.dp), stroke = 4.dp)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Heading("Speed")
+                Text(speedText(speed), color = Cream, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { contentDescription = "Speed " + speedText(speed) })
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Round("Slower", icon = R.drawable.ic_minus) { step(-1) }
+                    Round("Faster", icon = R.drawable.ic_plus) { step(1) }
+                }
             }
-            if (v == now) Button(onClick = choose, modifier = Modifier.fillMaxWidth()) { Text(speedText(v)) }
-            else FilledTonalButton(onClick = choose, modifier = Modifier.fillMaxWidth()) { Text(speedText(v)) }
         }
     }
 }
@@ -608,16 +773,23 @@ private fun VolumeScreen() {
     val max = remember { audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
     Every(500) { level = audio.getStreamVolume(AudioManager.STREAM_MUSIC) }
     fun step(direction: Int) { audio.adjustStreamVolume(AudioManager.STREAM_MUSIC, direction, 0); level = audio.getStreamVolume(AudioManager.STREAM_MUSIC) }
+    val focus = remember { FocusRequester() }
+    var turned by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
     ScreenScaffold {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(progress = { level.toFloat() / max }, modifier = Modifier.fillMaxSize().padding(2.dp), strokeWidth = 4.dp)
+        Box(Modifier.fillMaxSize().onRotaryScrollEvent { e ->
+            turned += e.verticalScrollPixels
+            while (kotlin.math.abs(turned) >= 48f) { step(if (turned > 0) AudioManager.ADJUST_RAISE else AudioManager.ADJUST_LOWER); turned -= if (turned > 0) 48f else -48f }
+            true
+        }.focusRequester(focus).focusable(), contentAlignment = Alignment.Center) {
+            Progress(level.toFloat() / max, Modifier.fillMaxSize().padding(5.dp), stroke = 4.dp)
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("Volume", style = MaterialTheme.typography.titleSmall)
-                Text("$level of $max", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Heading("Volume")
+                Text("$level", color = Cream, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.semantics { contentDescription = "Volume $level of $max" })
                 Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    FilledIconButton(onClick = { step(AudioManager.ADJUST_LOWER) }) { Icon(painterResource(R.drawable.ic_volume_down), "Quieter") }
-                    FilledIconButton(onClick = { step(AudioManager.ADJUST_RAISE) }) { Icon(painterResource(R.drawable.ic_volume_up), "Louder") }
+                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Round("Quieter", icon = R.drawable.ic_minus) { step(AudioManager.ADJUST_LOWER) }
+                    Round("Louder", icon = R.drawable.ic_plus) { step(AudioManager.ADJUST_RAISE) }
                 }
             }
         }
@@ -633,10 +805,10 @@ private fun SettingsScreen(store: Store, nav: NavHostController) {
     val bytes = remember { books.sumOf { store.audioBytes(it.id) } }
     val version = remember { runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName }.getOrNull().orEmpty() }
     Page {
-        item { ListHeader { Text("Settings") } }
-        item { Note("Signed in as ${store.user.ifBlank { "you" }} on ${host(store.serverUrl)}") }
-        item { Note(if (bytes > 0) "${megabytes(bytes)} of audiobooks on this watch" else "No audiobooks downloaded to this watch") }
-        item { FilledTonalButton(onClick = { nav.navigate("signout") }, modifier = Modifier.fillMaxWidth()) { Text("Sign out") } }
+        item { Heading("Settings") }
+        item { Tile(store.user.ifBlank { "Signed in" }, sub = host(store.serverUrl)) }
+        item { Tile("On this watch", sub = if (bytes > 0) megabytes(bytes) + " of audiobooks" else "No audiobooks downloaded") }
+        item { Tile("Sign out", icon = R.drawable.ic_close) { nav.navigate("signout") } }
         item { Note("Unison $version") }
     }
 }
@@ -647,10 +819,10 @@ private fun SignOutScreen(store: Store, nav: NavHostController) {
     val scope = rememberCoroutineScope()
     var leaving by remember { mutableStateOf(false) }
     Page {
-        item { ListHeader { Text("Sign out?") } }
-        item { Note("The audiobooks downloaded to this watch are removed. Your shelf and your places stay on your server.") }
+        item { Heading("Sign out?") }
+        item { Note("The audiobooks downloaded to this watch are removed. Your shelf and your places stay on your server.", Cream) }
         item {
-            Button(onClick = {
+            Tile(if (leaving) "Signing out…" else "Sign out", tone = Tone.Primary) {
                 if (!leaving) {
                     leaving = true
                     scope.launch {
@@ -665,8 +837,8 @@ private fun SignOutScreen(store: Store, nav: NavHostController) {
                         nav.navigate("link") { popUpTo("home") { inclusive = true } }
                     }
                 }
-            }, modifier = Modifier.fillMaxWidth()) { Text(if (leaving) "Signing out…" else "Sign out") }
+            }
         }
-        item { FilledTonalButton(onClick = { nav.popBackStack() }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") } }
+        item { Tile("Cancel") { nav.popBackStack() } }
     }
 }
