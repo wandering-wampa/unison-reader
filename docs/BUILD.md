@@ -38,6 +38,23 @@ Unison for Wear OS is its own app (`dev.homescreenreader.wear`, Wear OS 6 and la
 
 `.\Deploy-Server.ps1 -Target <ssh host>` builds `:server:installDist`, ships it to a Docker host over SSH and brings up the `unisonserver` stack (Temurin 21 JRE, ffmpeg, the model). The audiobook and Calibre folders are mounted read-only and are never written to. The web client is packaged inside the server jar and served at the root. Running it, the settings, the design and the API are in [SERVER.md](SERVER.md).
 
+## Linux and macOS
+
+The apps build with plain Gradle, without the PowerShell scripts. This path is what the repository's workflow runs on Ubuntu on every push; macOS has not been tried.
+
+You need JDK 21 and the Android SDK, found through `ANDROID_HOME` or `sdk.dir` in `local.properties`. The build asks for platform 36 (`compileSdk`; the watch app too), the NDK 27.2.12479018 and CMake 3.22.1, as set in `app/build.gradle.kts`; the SDK's command-line tools must be in `cmdline-tools/latest` for the next step to install the last two. The Android Gradle plugin downloads the build-tools it needs if the SDK's licences are accepted (`sdkmanager --licenses`).
+
+```sh
+sh ./bootstrap.sh --install-native-tools   # pinned third-party sources, the speech model, the NDK and CMake
+sh ./gradlew :app:assembleDebug :wear:assembleDebug -PpublicBuild --no-daemon --console=plain
+adb install -r app/build/outputs/apk/debug/app-debug.apk        # phone; add -e or -d to pick one device
+adb install -r wear/build/outputs/apk/debug/wear-debug.apk      # watch, as in the section above
+```
+
+`bootstrap.sh` does what `Bootstrap.ps1` does and holds the same pins; leave out `--install-native-tools` if the NDK and CMake are already installed. Run the wrapper through `sh`, since it may arrive without its executable bit. `-PpublicBuild` ignores any server address in `local.properties`.
+
+`Enter-Android.ps1`, `Start-Emulator.ps1`, `Test-Emulator.ps1`, `Tap-Emulator.ps1`, `Start-LocalServer.ps1`, `Deploy-Server.ps1`, `Test-Compose.ps1` and `Release.ps1` are Windows tools for developing the project and have no counterpart here. The server needs none of them: [SERVER.md](SERVER.md) covers "Running it" and "Building the image from source", and `sh ./gradlew --configure-on-demand :server:installDist` builds it without the Android SDK.
+
 ## Modules
 
 | Module | What it is |

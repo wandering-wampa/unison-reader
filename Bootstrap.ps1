@@ -1,3 +1,4 @@
+# bootstrap.sh holds the same pins for Linux and macOS: change them in both.
 param([switch]$InstallNativeTools)
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot

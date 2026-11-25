@@ -7,6 +7,7 @@ Versions before 0.11.0 were not published: the first release in this repository 
 - A forgotten admin password can be reset: put an empty file named `reset-admin` in the data folder. The server reads it once at start, and the setup page then asks for a new password and the setup key.
 - The README and the server guide have clearer install steps.
 - A workflow runs the server's tests on every pull request. This changelog and the security and contributing notes are new.
+- The apps can be built on Linux with `bootstrap.sh`, and the workflow builds both on every push.
 
 ## 0.12.0 (2026-11-25)
 
