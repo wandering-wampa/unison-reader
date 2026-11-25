@@ -1,0 +1,14 @@
+# What the image build does not need to see; the build fetches its own third-party sources.
+.git
+.gradle
+.kotlin
+.idea
+**/build
+vendor
+local.properties
+**/.cxx
+*.apk
+*.log
+test-results
+app/src/main/assets/models/*.onnx
+app/src/main/assets/models/*.bin

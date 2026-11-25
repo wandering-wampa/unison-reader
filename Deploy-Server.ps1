@@ -23,13 +23,15 @@ foreach ($k in 'unison.audiobooks', 'unison.ebooks') { if (-not $local[$k]) { th
 # Optional: unison.wantedWebhook, the Discord channel webhook new wanted-list requests are posted to (a secret; off when absent),
 # and unison.timezone, the IANA zone statistics fall back on (UTC when absent).
 # The .env can hold a secret (the webhook): on the server it is made readable by root alone, below.
-[IO.File]::WriteAllText("$stage\.env", "UNISON_AUDIOBOOKS=$($local['unison.audiobooks'])`nUNISON_EBOOKS=$($local['unison.ebooks'])`nUNISON_WANTED_WEBHOOK=$($local['unison.wantedWebhook'])`nTZ=$($local['unison.timezone'])`n")
+# The data folder and the port are written out in full, so this stack does not depend on compose.yaml's defaults
+# (./data and 8095, for someone who copies .env.example by hand): a data folder that moved would start an empty database.
+[IO.File]::WriteAllText("$stage\.env", "UNISON_AUDIOBOOKS=$($local['unison.audiobooks'])`nUNISON_EBOOKS=$($local['unison.ebooks'])`nUNISON_IMAGE=unisonserver:local`nUNISON_DATA=/opt/stacks/unisonserver/data`nUNISON_PORT=8095`nUNISON_WANTED_WEBHOOK=$($local['unison.wantedWebhook'])`nTZ=$($local['unison.timezone'])`n")
 tar -czf "$env:TEMP\unisonserver.tgz" -C $stage .
 if ($LASTEXITCODE -ne 0) { throw 'Packaging failed.' }
 
 scp "$env:TEMP\unisonserver.tgz" "${Target}:/tmp/unisonserver.tgz"
 if ($LASTEXITCODE -ne 0) { throw 'Upload failed.' }
-ssh $Target 'sudo mkdir -p /opt/stacks/unisonserver/data && sudo rm -rf /opt/stacks/unisonserver/build && sudo tar -xzf /tmp/unisonserver.tgz -C /opt/stacks/unisonserver && rm /tmp/unisonserver.tgz && sudo chmod 600 /opt/stacks/unisonserver/.env && cd /opt/stacks/unisonserver && sudo docker compose up -d --build 2>&1 | tail -5'
+ssh $Target 'sudo mkdir -p /opt/stacks/unisonserver/data && sudo rm -rf /opt/stacks/unisonserver/build && sudo tar -xzf /tmp/unisonserver.tgz -C /opt/stacks/unisonserver && rm /tmp/unisonserver.tgz && sudo chmod 600 /opt/stacks/unisonserver/.env && cd /opt/stacks/unisonserver && sudo docker build -q -t unisonserver:local build >/dev/null && sudo docker compose up -d 2>&1 | tail -5'
 if ($LASTEXITCODE -ne 0) { throw 'Deployment failed.' }
 Write-Host 'Deployed. Health:'
 ssh $Target 'sleep 5; curl -s http://127.0.0.1:8095/api/health'

@@ -10,7 +10,7 @@ Two folders of books, and somewhere to keep its own data.
 
 | | What | Layout |
 |---|---|---|
-| Ebooks | A **Calibre library** | Calibre's own folder: `Author/Title (id)/Title - Author.epub`, with `metadata.db` at the top. EPUBs are read; titles, authors, series and covers come from `metadata.db`. A folder of EPUBs that Calibre does not manage is not read yet. |
+| Ebooks | A Calibre library, or a folder of EPUBs | A Calibre library is Calibre's own folder, `Author/Title (id)/Title - Author.epub`, with `metadata.db` at the top; titles, authors, series and covers come from `metadata.db`. Without a `metadata.db`, every `.epub` under the folder is read, however it is arranged, and its title, authors, series, description and cover come from the EPUB itself. EPUBs are what is read in both cases. |
 | Audiobooks | A folder of audiobooks | `Author/Title/` with the audio inside: M4B, M4A, MP3, FLAC, OGG, Opus, AAC or WAV, several files in numeric order. This is the layout Audiobookshelf uses, and its `metadata.json` beside the audio is read when it is there. |
 | Data | An empty folder to begin with | The catalogue database, alignments, covers and backups. Everything the server writes goes here. |
 
@@ -25,13 +25,53 @@ worker holds one chapter of audio in memory (under 200 MB for an hour-long chapt
 
 ## Running it
 
-There is no published image yet. The image is built on the Docker host from a distribution made on a
-development machine; the scripts assume Windows with PowerShell and an SSH connection to the host (the tools
-are listed in [BUILD.md](BUILD.md)).
+The server runs as one container. The image is built from a clone of this repository with Docker alone: no
+JDK, Android SDK or other tools are needed on the machine, and it works the same on Linux, macOS and Windows.
+
+1. Clone the repository and build the image from its top folder:
+
+   ```sh
+   docker build -t unisonserver:local .
+   ```
+
+   The build compiles the server, fetches the reader's pinned third-party source and the speech model (checking
+   the model against its SHA-256; the build stops if it does not match) and installs ffmpeg. It takes a few
+   minutes the first time and needs network access. The image is built for the platform you build on: x86-64 or
+   ARM64.
+
+2. Make a folder for the stack and put two files in it: `server/deploy/compose.yaml` as it is, and a `.env` made
+   from `server/deploy/.env.example`. In the `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two
+   library folders, and take the `#` off the `UNISON_IMAGE=unisonserver:local` line so the stack runs the image
+   you built.
+
+3. In that folder:
+
+   ```sh
+   docker compose up -d
+   ```
+
+Only those three lines of `.env` have to change. With the rest as `.env.example` has it, the server keeps its
+data in `data/` beside `compose.yaml` (made on the first start) and the web client is at `http://<host>:8095`.
+When either library folder is not set, Compose refuses to start and names the missing line. The file can hold a
+secret (the webhook), so make it readable by you alone.
+
+To update, pull the new source, run the `docker build` again and run `docker compose up -d` again: the
+container is replaced and the data folder is left as it is.
+
+The workflow in `.github/workflows/image.yml` builds the same Dockerfile for x86-64 and ARM64 and publishes it
+as `ghcr.io/wandering-wampa/unison-reader` when a release is tagged, with the version as its tag and `latest`.
+Until a release has published it, build the image yourself as above. Once it is there, leave `UNISON_IMAGE`
+out of the `.env` and `docker compose up -d` pulls it.
+
+### Deploying from Windows to a remote host
+
+For development, `Deploy-Server.ps1` builds the distribution on a Windows machine and puts it on a Docker host
+over SSH (the tools are listed in [BUILD.md](BUILD.md)). It builds the image on the host from
+`server/deploy/Dockerfile`, which only adds a JRE and ffmpeg to the distribution it is given.
 
 1. `.\Bootstrap.ps1`, once: fetches the pinned third-party sources and the speech model.
 2. In `local.properties` at the top of the checkout (a file Git ignores), say where the two libraries are
-   **on the Docker host**:
+   on the Docker host:
 
    ```properties
    unison.audiobooks=/path/on/the/host/audiobooks
@@ -40,44 +80,35 @@ are listed in [BUILD.md](BUILD.md)).
 
 3. `.\Deploy-Server.ps1 -Target <ssh host>`: builds the distribution (`gradlew :server:installDist`), copies
    it with the model and `server/deploy/` to `/opt/stacks/unisonserver` on the host, writes the stack's `.env`
-   from step 2, runs `docker compose up -d --build` there and prints the server's health answer. The SSH user
-   needs `sudo` and Docker.
+   from step 2 (with `UNISON_IMAGE=unisonserver:local`), builds the image there, runs `docker compose up -d`
+   and prints the server's health answer. The SSH user needs `sudo` and Docker.
 
-The image is `eclipse-temurin:21-jre` plus ffmpeg, so the host needs Docker and nothing else. The stack
-publishes host port **8095** (the left-hand number in `server/deploy/compose.yaml`), mounts the two libraries
-read-only and keeps its data in `/opt/stacks/unisonserver/data`. `/opt/stacks/<name>` is where Dockge keeps
-its stacks, so the server appears there when Dockge is in use; nothing depends on it. To put the stack
-somewhere else, change that path in `compose.yaml` and `Deploy-Server.ps1`.
-
-To update, run `Deploy-Server.ps1` again: the image is rebuilt and the container restarted, and the data
-folder is left as it is.
-
-Doing it by hand comes to the same thing. This is what the script leaves on the host:
-
-```
-/opt/stacks/unisonserver/
-  compose.yaml        from server/deploy/
-  .env                UNISON_AUDIOBOOKS=… and UNISON_EBOOKS=… (the two host folders), readable by root only
-  build/
-    Dockerfile        from server/deploy/
-    install/          server/build/install/server, as `gradlew :server:installDist` made it
-    model.onnx        app/src/main/assets/models/quartznet15x5-en.int8.onnx, as Bootstrap.ps1 fetched it
-  data/               made on the first start
-```
+The script writes the data folder as `/opt/stacks/unisonserver/data` and the host port as 8095. To put the stack
+somewhere else, change that path in the script. Running it again updates the stack and leaves the data folder as it is.
 
 ### Settings
 
-`local.properties` on the development machine, carried to the host's `.env` by `Deploy-Server.ps1`:
+The stack's `.env`, which `compose.yaml` reads. `server/deploy/.env.example` has every line with a note.
+`Deploy-Server.ps1` writes the file from `local.properties` on the development machine, as the middle
+column says:
 
-| `local.properties` | In the container | What it is |
+| `.env` | From `local.properties` | What it is |
 |---|---|---|
-| `unison.audiobooks` | mounted at `/audiobooks` | The audiobook folder on the host. Needed. |
-| `unison.ebooks` | mounted at `/ebooks` | The Calibre library on the host. Needed. |
-| `unison.timezone` | `TZ` | An IANA zone such as `Europe/Berlin`; UTC when absent. Only a fallback: the app and the web send each person's own zone for their statistics. |
-| `unison.wantedWebhook` | `UNISON_WANTED_WEBHOOK` | A Discord channel webhook that new wanted-list requests are posted to. A secret. Off when absent. |
-| `unison.defaultServer` | (the app, not the server) | The address the app's sign-in form starts with in builds you make yourself. Left out of a build made with `-PpublicBuild`. |
+| `UNISON_IMAGE` | (the script writes `unisonserver:local`) | The image to run. The published `ghcr.io/wandering-wampa/unison-reader:latest` when absent; `unisonserver:local` for one you built yourself. |
+| `UNISON_AUDIOBOOKS` | `unison.audiobooks` | The audiobook folder on the host, mounted read-only at `/audiobooks`. Needed. |
+| `UNISON_EBOOKS` | `unison.ebooks` | The ebook folder on the host (a Calibre library or a folder of EPUBs), mounted read-only at `/ebooks`. Needed. |
+| `UNISON_DATA` | (the script writes `/opt/stacks/unisonserver/data`) | Where the server keeps its own files on the host, mounted at `/data`. `./data`, a folder beside `compose.yaml`, when absent. To move it later, move the folder's contents too: an empty data folder is a new server. |
+| `UNISON_PORT` | (the script writes `8095`) | The port on the host. `8095` when absent. |
+| `TZ` | `unison.timezone` | An IANA zone such as `Europe/Berlin`; UTC when absent or empty. Only a fallback: the app and the web send each person's own zone for their statistics. |
+| `UNISON_WANTED_WEBHOOK` | `unison.wantedWebhook` | A Discord channel webhook that new wanted-list requests are posted to. A secret. Off when absent or empty. |
 
-Read by the server itself, for a setup that is not this compose file:
+`local.properties` also carries `unison.defaultServer`, which is for the app and not the server: the address
+the app's sign-in form starts with in builds you make yourself. It is left out of a build made with
+`-PpublicBuild`.
+
+Read by the server itself, for a setup that is not this compose file. The first three share their names with
+lines of `.env`, where they are folders on the host; those are not passed into the container, and inside it
+the defaults below apply:
 
 | Variable | Default | What it is |
 |---|---|---|
@@ -86,24 +117,61 @@ Read by the server itself, for a setup that is not this compose file:
 | `PORT` | `8080` | The port it listens on |
 | `UNISON_WORKERS` | a third of the cores, between 1 and 4 (the compose file says 4) | Books aligned at the same time |
 | `UNISON_MAX_EBOOK_MB` | `400` | The largest EPUB it will parse |
-| `UNISON_TOKEN` | made on the first start and kept in `data/token` | The install's first key (next section) |
+| `UNISON_TOKEN` | made on the first start and kept in `data/token` | The install's first key, which is also the setup key (next section) |
 
 ### The first sign-in
 
-A new install has one account, `admin`, with no password yet, and one key, written to `data/token` on the
-first start. Use the key once, on the host, to give `admin` a password of eight characters or more:
+A new server has one account, `admin`, and that account has no password, so nobody can sign in yet. Open the
+server's address in a browser. Until some account has a password, the web client shows a setup page in place
+of the sign-in form.
 
-```sh
-curl -X POST http://localhost:8095/api/me/password \
-  -H "Authorization: Bearer $(sudo cat /opt/stacks/unisonserver/data/token)" \
-  -H "Content-Type: application/json" \
-  -d '{"password":"a password of your own"}'
-```
+The page says how many ebooks and audiobooks the first scan found. It also says when the ebook folder has no
+`metadata.db`, which means the EPUBs in it are read directly, and when either
+folder is empty, which usually means a wrong path in `.env`. On a large library the first scan takes a while
+and the numbers grow as you watch. You do not have to wait for it, and a wrong folder can be fixed
+afterwards: the libraries are read again every two minutes.
 
-It answers `Password set`. Then open the server's address in a browser and sign in as `admin`. The Admin page
-adds the other people in the house, each with a role (admin or member) and a password they can change. The
-key is listed among `admin`'s devices as `server`; once you are signed in with the password, sign that device
-out on the Account page so the file no longer opens anything.
+Then it asks for the password for `admin` twice, eight characters or more, and signs you in. The Admin page
+adds the other people in the house, each with a role (admin or member) and a password they can change.
+
+Setup works once. From the moment any account has a password the setup page is no longer shown,
+`POST /api/setup` answers 409, and the sign-in form is the only way in.
+
+#### Who may do the setup
+
+A new server that can be reached from the internet could be claimed by whoever opens it first. So the server
+looks at where a setup request comes from:
+
+- From the machine itself or a private network address (10.x, 172.16.x to 172.31.x, 192.168.x, link-local,
+  and the IPv6 loopback, link-local and unique local ranges), the password is all it asks for.
+- From any other address the page has one more field, the setup key, and the request is refused without it.
+  The setup key is the contents of the file `token` in the data folder (`cat data/token` beside
+  `compose.yaml`), or the value of `UNISON_TOKEN` if you set that variable. Only someone who can read the
+  server's own files has it.
+
+Both simpler rules were worse. Asking everyone for the key would send every new owner back to a terminal,
+when the usual first run is a browser on the same network as the server. Allowing private addresses only
+would leave a server on a rented machine, or one reached over a VPN that hands out other addresses, with no
+way to be set up at all.
+
+Wrong keys are slowed the way wrong passwords are (five from one address, then a wait that doubles), and the
+setup and every refusal are written to the audit log with the caller's address.
+
+The server can only judge the address it is shown. Behind a reverse proxy it sees the proxy, and depends on
+the proxy naming the caller in `X-Forwarded-For`, `X-Real-IP` or `Forwarded`. Caddy, Traefik and Nginx Proxy
+Manager send one of these as they come; a hand-written nginx `proxy_pass` does not until you add
+`proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`. A request counts as local only when the
+connection and every address named in those headers are private, so a header made up by the caller cannot
+turn an outside request into a local one.
+
+Two arrangements hide the caller altogether: a proxy that sends none of those headers, and Docker Desktop or
+rootless Docker and Podman, which can hand every connection to the container from a private address of
+their own. The server then cannot tell inside from outside. On those, give `admin` its password before you
+forward a port or point a proxy at the server.
+
+The same key is the install's first sign-in for the API: it is listed among `admin`'s devices as `server`
+and is accepted as a bearer token. If you have no use for that, sign the device out on the Account page once
+you are signed in with the password. The file then opens nothing.
 
 ### Reaching it from outside the house
 
@@ -154,13 +222,13 @@ forever, so installed libraries carry over.
 ## Server design
 
 **Scanner.** Walks the audiobook root (`Author/Title/`, tracks ordered numerically, durations and
-chapters from ffprobe) and the Calibre library (`metadata.db`: books, authors, formats, covers).
+chapters from ffprobe) and the ebooks: a Calibre library through `metadata.db` (books, authors, formats, covers), or, when the folder has no `metadata.db`, every EPUB under it through its own OPF metadata and cover. The two are never mixed. In the second case an EPUB is opened again only when its size or modification time changes, and covers are written to the data folder.
 Pairs an audiobook with an ebook through `BookIdentity`: conservative title aliases, full authors,
 and known series/volume metadata. Persistence keys and work IDs are unchanged by these comparison
 rules. Each title becomes a *work* with zero or one ebook and zero or one audiobook; the
 shelves the app shows (Ready, Getting ready, Missing a piece) fall out of that.
 
-**Metadata.** Each work carries subtitle, description, published year, publisher, language, rating, genres, any number of series with a sequence, authors and narrators. Sources are ranked: Calibre's `metadata.db` (3), Audiobookshelf's `metadata.json` beside the audio (2), the audio files' tags (1), the folder name (0); a field set by a stronger source is never overwritten by a weaker one, and a weaker source only fills blanks. Nothing is written back to either library.
+**Metadata.** Each work carries subtitle, description, published year, publisher, language, rating, genres, any number of series with a sequence, authors and narrators. Sources are ranked: Calibre's `metadata.db`, or the EPUB's own metadata when there is no `metadata.db` (3), Audiobookshelf's `metadata.json` beside the audio (2), the audio files' tags (1), the folder name (0); a field set by a stronger source is never overwritten by a weaker one, and a weaker source only fills blanks. Nothing is written back to either library.
 
 **Catalog.** SQLite at `/data/catalog.db`: works, files, pairing overrides, sync state per unit
 (the same unit model as the app: one unit per audiobook chapter or track), anchors, device
@@ -191,7 +259,9 @@ address and per name (five misses, then a lockout doubling from 30 s to 15 min, 
 characters or more; every response carries a content security policy (scripts from the server only,
 styles and fonts from the server and Google Fonts, frames and media from the server and blob URLs), no
 framing, no sniffing, no referrer; the public health answer no longer lists what is syncing; the install's
-original token is seeded only on a fresh install and can be revoked like any device; and sign-ins,
+original token is seeded only on a fresh install and can be revoked like any device; the first-run setup
+takes a password alone only from a private address and needs the setup key from anywhere else ("The first
+sign-in" above); and sign-ins, the setup,
 failures, lockouts, expiries, device sign-outs and account changes go to an `audit` table that admins see
 on the web client's Account page (`GET /api/users/audit`). Not yet: a second factor (TOTP or passkeys).
 
@@ -213,6 +283,7 @@ on the web client's Account page (`GET /api/users/audit`). Not yet: a second fac
 | `GET/PUT /api/works/{id}/position` | reading passage and audio position, kept per user and device; GET answers the newest from any device with `by` (that device's name); PUT with `?base=` (the server time of the place the client last had) answers 409 with the newer place when another device moved the book after it |
 | `GET /api/works/{id}/speed`, `PUT /api/works/{id}/speed` (speed) | my listening speed for the book, 0.5 to 3; GET gives 1 with `updated` 0 when never set; also in the work detail as `speed` |
 | `POST /api/login` | name + password + device → token and user; `web: true` also sets the browser cookie; throttled |
+| `GET /api/setup`, `POST /api/setup` (password, key, device, web) | the first run, no token needed. GET answers `needed` (true while no account has a password), `key` (true when this caller must also send the setup key), `minPassword`, and `library`: what the scan has found so far (`ebooks`, `audiobooks`, `paired`, `scanned` once a pass has ended, `calibre` when the ebook folder has a `metadata.db`, `ebookFolderEmpty`, `audiobookFolderEmpty`). POST gives the built-in `admin` its password and answers as a sign-in does (token and user, and the cookie with `web: true`). 403 without the right key from an address that is not private, 400 for a password under eight characters, 429 after five wrong keys from one address, and 409 once any account has a password, after which GET answers only `needed: false` |
 | `POST /api/link/start` (device), `POST /api/link/claim` (secret) | Wear OS sign-in, the watch's side, no token needed. `start` answers a six-digit `code` to show, a `secret` to ask with, when the code `expires` and how often to ask (`poll`, seconds); 429 when five codes already wait from that address, or a hundred in all. `claim` answers `{status: "waiting"}` until a signed-in person approves the code, then once `{status: "approved", token, user}`; 410 when the code has ended, been used, or never was |
 | `GET /api/me/link/{code}`, `POST /api/me/link/{code}` | Wear OS sign-in, the signed-in side: which device shows this code (`device`, `address`, `created`), and yes, sign it in as me. 404 for a code nobody is waiting behind; five wrong codes in a row and the person waits, as with wrong passwords (429) |
 | `POST /api/me/cookie` | sets the browser cookie for a token a browser already holds |
@@ -287,7 +358,8 @@ The separator is a space, a middle dot (U+00B7) and a space. A request for both 
 ## The app's server mode
 
 - **Sign in**: a sign-in screen on first launch (and after Sign out or an expired token) with the
-  household's server filled in, a Change button for another address, name and password; the device
+  server filled in (a build with no default server shows the address field open instead), a Change
+  button for another address, name and password; the device
   token it receives is kept. Settings keeps Sign in as someone else, Sign out, devices and password.
   The link `unisonreader://connect?url=…&token=…` opened from a browser or
   `adb shell am start -a android.intent.action.VIEW -d "<link>"`. The connection and a generated

@@ -411,7 +411,7 @@ private fun LinkScreen(store: Store, server: String, signedIn: () -> Unit, chang
         item { Heading("Wear OS sign-in") }
         when (val p = phase) {
             is Link.Asking -> item { Note("Asking ${host(server)} for a code…") }
-            is Link.NoServer -> item { Note("Which server is your library on?") }
+            is Link.NoServer -> { item { Note("Which server is your library on?") }; item { Tile("Type its address", tone = Tone.Primary, onClick = changeServer) } }
             is Link.Code -> {
                 item { Text(p.code.take(3) + " " + p.code.drop(3), fontSize = 38.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.02.em, color = Teal, modifier = Modifier.semantics { contentDescription = "Code " + p.code }) }
                 item { Note("In Unison on your phone, open Settings, then Wear OS sign-in, and type this code.", Cream) }
@@ -419,7 +419,7 @@ private fun LinkScreen(store: Store, server: String, signedIn: () -> Unit, chang
             is Link.Ended -> { item { Note("That code has ended.") }; item { Tile("New code", tone = Tone.Primary, icon = R.drawable.ic_refresh) { attempt++ } } }
             is Link.Failed -> { item { Note(p.why) }; item { Tile("Try again", tone = Tone.Primary, icon = R.drawable.ic_refresh) { attempt++ } } }
         }
-        item { Tile("Server", sub = host(server).ifBlank { "Not set" }, onClick = changeServer) }
+        if (phase !is Link.NoServer) item { Tile("Server", sub = host(server), onClick = changeServer) }
     }
 }
 

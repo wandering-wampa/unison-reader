@@ -124,6 +124,78 @@ object Ebooks {
         }
     }
 
+    /** What an EPUB says about itself in its OPF; blank or null where it says nothing. `cover` is the image's bytes, `coverExtension` its file extension. */
+    class Info(
+        val title: String, val authors: List<String>, val series: String?, val seriesIndex: Double?,
+        val description: String?, val publisher: String?, val language: String?, val year: String?,
+        val cover: ByteArray?, val coverExtension: String,
+    )
+
+    /** Reads only the package metadata and the cover of an EPUB, not its text. Throws when the file is not a readable EPUB. */
+    fun info(file: File): Info {
+        require(file.length() <= maxBytes) { "Ebook exceeds ${maxBytes shr 20} MB" }
+        ZipFile(file).use { zip ->
+            fun read(path: String): ByteArray {
+                require(!path.startsWith('/') && !path.split('/').contains("..")) { "Unsafe EPUB path" }
+                val entry = zip.getEntry(path) ?: error("Missing EPUB resource: $path")
+                val bytes = zip.getInputStream(entry).use { it.readNBytes(maxBytes.toInt() + 1) }
+                require(bytes.size <= maxBytes) { "Expanded EPUB exceeds limit" }
+                return bytes
+            }
+            fun xml(path: String): org.jsoup.nodes.Document {
+                val text = read(path).toString(Charsets.UTF_8)
+                require(!Regex("<!\\s*(DOCTYPE|ENTITY)", RegexOption.IGNORE_CASE).containsMatchIn(text)) { "Unsafe XML declarations" }
+                return Jsoup.parse(text, "", org.jsoup.parser.Parser.xmlParser())
+            }
+            fun org.jsoup.nodes.Element.named(name: String) =
+                allElements.filter { it.tagName().substringAfterLast(':').equals(name, ignoreCase = true) }
+            val opfPath = xml("META-INF/container.xml").named("rootfile").firstOrNull()?.attr("full-path")?.takeIf { it.isNotBlank() }
+                ?: error("Invalid EPUB container")
+            val opf = xml(opfPath)
+            fun uri(s: String): URI = try { URI(s) } catch (e: java.net.URISyntaxException) { URI(null, null, s, null) }
+            fun resolve(href: String): String {
+                val u = uri(opfPath).resolve(uri(href)).normalize()
+                require(!u.isAbsolute && u.authority == null) { "Unsafe EPUB path" }
+                return u.path ?: error("Unsafe EPUB path")
+            }
+            val metadata = opf.named("metadata").firstOrNull() ?: opf
+            fun texts(name: String) = metadata.named(name).map { it.text().trim() }.filter { it.isNotBlank() }
+            val metas = metadata.named("meta")
+            var series = metas.firstOrNull { it.attr("name") == "calibre:series" }?.attr("content")?.trim()?.takeIf { it.isNotBlank() }
+            var index = metas.firstOrNull { it.attr("name") == "calibre:series_index" }?.attr("content")?.trim()?.toDoubleOrNull()
+            if (series == null) {
+                // EPUB 3: a collection of type series, its position given by a meta that refines it.
+                val collection = metas.firstOrNull { m ->
+                    m.attr("property") == "belongs-to-collection" && m.text().isNotBlank() &&
+                        metas.none { it.attr("property") == "collection-type" && it.attr("refines") == "#${m.id()}" && it.text().trim() != "series" }
+                }
+                if (collection != null) {
+                    series = collection.text().trim()
+                    index = metas.firstOrNull { it.attr("property") == "group-position" && it.attr("refines") == "#${collection.id()}" }?.text()?.trim()?.toDoubleOrNull()
+                }
+            }
+            val items = opf.named("item")
+            val imageTypes = setOf("jpg", "jpeg", "png", "gif", "webp")
+            fun isImage(e: org.jsoup.nodes.Element) = e.attr("media-type").startsWith("image/") || e.attr("href").substringAfterLast('.').lowercase() in imageTypes
+            val coverId = metas.firstOrNull { it.attr("name") == "cover" }?.attr("content")
+            val cover = items.firstOrNull { it.attr("properties").split(' ').contains("cover-image") }
+                ?: items.firstOrNull { coverId != null && it.id() == coverId && isImage(it) }
+                ?: items.firstOrNull { it.id().lowercase() in setOf("cover", "cover-image", "coverimage") && isImage(it) }
+            val coverBytes = cover?.let { runCatching { read(resolve(it.attr("href"))) }.getOrNull() }?.takeIf { it.isNotEmpty() }
+            val ext = cover?.attr("href")?.substringAfterLast('.', "")?.lowercase()?.takeIf { it in imageTypes } ?: "jpg"
+            return Info(
+                title = texts("title").firstOrNull().orEmpty(),
+                authors = texts("creator"),
+                series = series, seriesIndex = index,
+                description = texts("description").firstOrNull()?.let { Jsoup.parse(it).text().trim() }?.takeIf { it.isNotBlank() },
+                publisher = texts("publisher").firstOrNull(),
+                language = texts("language").firstOrNull(),
+                year = texts("date").firstOrNull()?.take(4)?.takeIf { y -> y.length == 4 && y.all(Char::isDigit) },
+                cover = coverBytes, coverExtension = if (ext == "jpeg") "jpg" else ext,
+            )
+        }
+    }
+
     private fun fromHtml(
         id: String,
         title: String,

@@ -115,7 +115,7 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
             route("/api") {
                 intercept(ApplicationCallPipeline.Plugins) {
                     val path = call.request.path()
-                    if (!path.startsWith("/api") || path == "/api/health" || path == "/api/login" || path == "/api/link/start" || path == "/api/link/claim") return@intercept
+                    if (!path.startsWith("/api") || path == "/api/health" || path == "/api/login" || path == "/api/setup" || path == "/api/link/start" || path == "/api/link/claim") return@intercept
                     val presented = bearer(call) ?: if (cookieMayAuthorize(path, call.request.httpMethod)) call.request.cookies[COOKIE] else null
                     val user = presented?.let { users.authenticate(it) }
                     if (user == null) { call.respond(HttpStatusCode.Unauthorized, Message("Sign in first")); finish(); return@intercept }
@@ -141,6 +141,40 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     users.audit(user.name, "signed in", address, deviceName)
                     if (req.web) call.response.cookies.append(sessionCookie(call, token, (Users.WEB_IDLE_MS / 1000).toInt()))
                     call.respond(LoginAnswer(token, user))
+                }
+                // The first run (Setup): while no account has a password, anyone may ask whether setup is needed and what the
+                // scan found, and one request may give the built-in admin its password and be signed in. From this
+                // machine or a private network the password is enough; from anywhere else the setup key is needed too.
+                // Once any password exists both routes say so and do nothing more.
+                route("/setup") {
+                    fun local(call: ApplicationCall) = Setup.local(call.request.origin.remoteAddress, Setup.forwarded { call.request.headers.getAll(it).orEmpty() })
+                    get {
+                        if (!users.setupNeeded()) return@get call.respond(SetupStatus(needed = false))
+                        call.respond(SetupStatus(needed = true, key = !local(call), library = Setup.library(config, catalog.works(), scanner.scanned)))
+                    }
+                    post {
+                        val req = call.receive<SetupRequest>()
+                        val done = Message("This server is already set up. Sign in instead.")
+                        if (!users.setupNeeded()) return@post call.respond(HttpStatusCode.Conflict, done)
+                        val address = clientAddress(call); val key = "setup:$address"
+                        users.throttle.blocked(key)?.let { wait ->
+                            users.audit("admin", "setup throttled", address, "$wait s left")
+                            call.response.header(HttpHeaders.RetryAfter, wait.toString())
+                            return@post call.respond(HttpStatusCode.TooManyRequests, Message("Too many attempts. Try again in ${if (wait >= 120) "${(wait + 59) / 60} minutes" else "$wait seconds"}."))
+                        }
+                        if (!local(call) && !Setup.keyMatches(req.key, config.token)) {
+                            users.throttle.fail(key)
+                            users.audit("admin", "setup refused", address, if (req.key.isBlank()) "no setup key" else "wrong setup key")
+                            return@post call.respond(HttpStatusCode.Forbidden, Message(if (req.key.isBlank()) "From this address the setup key is needed too." else "That is not this server's setup key."))
+                        }
+                        if (!users.setUp(req.password)) return@post call.respond(HttpStatusCode.Conflict, done)
+                        users.throttle.clear(key)
+                        val admin = users.byId(1)!!; val deviceName = req.device.ifBlank { device(call) }
+                        val token = users.issue(admin.id, deviceName)
+                        users.audit(admin.name, "server set up", address, deviceName)
+                        if (req.web) call.response.cookies.append(sessionCookie(call, token, (Users.WEB_IDLE_MS / 1000).toInt()))
+                        call.respond(LoginAnswer(token, admin))
+                    }
                 }
                 // Signing in a watch by a code (DeviceLinks): the device asks for a code without a sign-in, shows it, and
                 // then asks with its secret until a signed-in person has approved the code (/me/link below).

@@ -120,6 +120,19 @@ class Users(private val db: Connection, private val legacyToken: String) {
     /** True when this account has a password at all (the built-in admin of a token-only server has none). */
     fun hasPassword(id: Long): Boolean = query("SELECT hash FROM users WHERE id = ?", id) { it.getString(1) }.firstOrNull().orEmpty().isNotBlank()
 
+    /** True while no account has a password, which is a server nobody has set up: nobody can sign in by name. */
+    fun setupNeeded(): Boolean = query("SELECT COUNT(*) FROM users WHERE hash != ''") { it.getInt(1) }.first() == 0
+
+    /**
+     * The first run: gives the built-in admin its password, once. The check and the change are one statement, so of
+     * two requests arriving together only one succeeds; false when some account already had a password.
+     */
+    fun setUp(password: String): Boolean {
+        require(password.length >= MIN_PASSWORD) { "A password is at least $MIN_PASSWORD characters" }
+        val salt = salt()
+        return exec("UPDATE users SET hash = ?, salt = ? WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM users WHERE hash != '')", hash(password, salt), salt) == 1
+    }
+
     /** True when this is the account's password. */
     fun checkPassword(id: Long, password: String): Boolean {
         val row = query("SELECT hash, salt FROM users WHERE id = ?", id) { it.getString(1) to it.getString(2) }.firstOrNull()

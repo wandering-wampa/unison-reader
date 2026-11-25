@@ -1,0 +1,52 @@
+# Builds the server image for x86-64 and ARM64 and publishes it to the GitHub Container Registry.
+# Runs on a version tag (v*) or by hand; only in the public repository.
+name: Server image
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/wandering-wampa/unison-reader
+
+jobs:
+  image:
+    if: github.repository == 'wandering-wampa/unison-reader'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="dev-${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A tag publishes :<version> and :latest; a manual run from a branch publishes :dev-<commit> only.
+      - name: Tags
+        id: tags
+        run: |
+          t="$IMAGE:${{ steps.version.outputs.version }}"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then t="$t,$IMAGE:latest"; fi
+          echo "tags=$t" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}

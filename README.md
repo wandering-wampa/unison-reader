@@ -14,7 +14,7 @@ I built it for my own household's library and it's shared as it is. The [Status]
 
 ## How it works
 
-You point the server at two folders: a Calibre library and a folder of audiobooks. It reads them and never writes to either. It matches each audiobook to its ebook by title, author and series. The ones it can't match show up in a list, and an admin pairs them by hand.
+You point the server at two folders: a folder of ebooks (a Calibre library, or just EPUB files) and a folder of audiobooks. It reads them and never writes to either. It matches each audiobook to its ebook by title, author and series. The ones it can't match show up in a list, and an admin pairs them by hand.
 
 For each pair, the server runs the audio through a speech model and lines the output up against the book's text. That gives a start and end time for nearly every sentence. A thirty-hour audiobook takes about twenty minutes on a six-core laptop processor. Where the model can't place a sentence it leaves it unmatched. There is no guessing from page position or elapsed time.
 
@@ -46,9 +46,8 @@ The screenshots come from a demo library of public-domain books (Standard Ebooks
 
 It's in daily use here. For anyone else it's early. Before you spend an evening on it:
 
-- There's no Docker image to pull. You build the server from this repository, and the scripts that do it are PowerShell, written on Windows.
-- There's no setup screen. A new server's first password is set with one `curl` command, described under "The first sign-in" in [the server guide](docs/SERVER.md).
-- Ebooks have to be in a Calibre library. A plain folder of EPUBs isn't read yet.
+- You build the server image yourself, with one `docker build` from a clone of this repository. It needs only Docker and works on any OS. The compose file then needs an `.env` with your two folders in it, and there's an `.env.example` to copy.
+- Ebooks are read as EPUBs only. MOBI and AZW3 files are skipped, and a Calibre library is read from its `metadata.db` when there is one.
 - Narration follow only works for English books. The speech model is English, so other languages read and play fine but never sync.
 - The app needs Android 15 or later and is sideloaded. The APKs are debug-signed builds, not store releases.
 - Sign-in is a password. It's throttled and logged, but there's no second factor, so think before you put a server on the open internet.
@@ -57,10 +56,12 @@ It's in daily use here. For anyone else it's early. Before you spend an evening 
 
 ## What you need
 
-- A Calibre library, meaning the folder with `metadata.db` in it. EPUBs are what gets read.
+- Ebooks as EPUB files in a folder, either a Calibre library (the folder with `metadata.db` in it) or any folder of EPUBs.
 - Audiobooks in `Author/Title/` folders, which is how Audiobookshelf lays them out. M4B, MP3 and the other common formats work.
 - A machine that runs Docker, with both folders mounted read-only. Calibre and Audiobookshelf don't need to be running.
 - An Android 15 or later phone for the app, or just a desktop browser.
+
+A new server has no password. The first time you open it in a browser it shows what it found in the two folders and asks you to choose the admin password. If you open it from outside your own network it also asks for a key that's in a file on the server, so a stranger can't get there first.
 
 [The server guide](docs/SERVER.md) covers running it, the settings, the first sign-in and putting a reverse proxy in front of it.
 

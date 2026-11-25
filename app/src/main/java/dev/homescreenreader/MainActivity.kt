@@ -2974,12 +2974,16 @@ class MainActivity : AppCompatActivity() {
         ui.space(body, 8)
         body.addView(ui.text("Your ebooks and audiobooks, in unison.", 15f).apply { setTextColor(ui.muted); gravity = Gravity.CENTER })
         ui.space(body, 32)
-        val address = field("Server address, e.g. unison.example.com", initial = state.serverUrl.ifBlank { DEFAULT_SERVER }).apply { inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI; visibility = View.GONE }
+        val address = field("Server, e.g. https://unison.example.org", initial = state.serverUrl.ifBlank { DEFAULT_SERVER }).apply { inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI; visibility = View.GONE }
+        // A build with no default server (and nothing saved) has no address to show: the field is open from the start.
+        val noServer = address.text.isBlank()
+        if (noServer) address.visibility = View.VISIBLE
         val serverLine = ui.row()
         val serverText = ui.text("Server · ${serverLabel(address.text.toString())}", 13f).apply { setTextColor(ui.muted) }
         serverLine.addView(serverText, LinearLayout.LayoutParams(0, -2, 1f))
         serverLine.addView(ui.button("Change", false) { address.visibility = View.VISIBLE; serverLine.visibility = View.GONE; address.requestFocus() }.apply { textSize = 13f; minHeight = dp(36) })
-        body.addView(serverLine); body.addView(address, LinearLayout.LayoutParams(-1, -2)); ui.space(body, 12)
+        if (!noServer) body.addView(serverLine)
+        body.addView(address, LinearLayout.LayoutParams(-1, -2)); ui.space(body, 12)
         val name = field("Your name", initial = state.serverUser)
         val password = field("Password", password = true)
         body.addView(name, LinearLayout.LayoutParams(-1, -2)); ui.space(body, 10)
@@ -2990,7 +2994,9 @@ class MainActivity : AppCompatActivity() {
         lateinit var signIn: MaterialButton
         fun attempt() {
             val url = address.text.toString().trim(); val who = name.text.toString().trim(); val secret = password.text.toString()
-            if (url.isBlank() || who.isBlank() || secret.isBlank()) { error.text = "Your name and password are both needed."; error.setTextColor(ui.error); error.visibility = View.VISIBLE; return }
+            if (url.isBlank()) { error.text = "Type the server's address first, like https://unison.example.org."; error.setTextColor(ui.error); error.visibility = View.VISIBLE; address.visibility = View.VISIBLE; serverLine.visibility = View.GONE; address.requestFocus(); return }
+            if (url.any { it.isWhitespace() } || runCatching { java.net.URI(ServerClient.normalize(url)).host }.getOrNull().isNullOrBlank()) { error.text = "That is not a server address. It looks like https://unison.example.org."; error.setTextColor(ui.error); error.visibility = View.VISIBLE; address.visibility = View.VISIBLE; serverLine.visibility = View.GONE; address.requestFocus(); return }
+            if (who.isBlank() || secret.isBlank()) { error.text = "Your name and password are both needed."; error.setTextColor(ui.error); error.visibility = View.VISIBLE; return }
             signIn.isEnabled = false; signIn.text = "Signing in…"; error.visibility = View.GONE
             (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).hideSoftInputFromWindow(password.windowToken, 0)
             kotlin.concurrent.thread {
@@ -3037,7 +3043,7 @@ class MainActivity : AppCompatActivity() {
         if (Alignment.onDevice || db.books().isNotEmpty()) body.addView(ui.button("Use this phone without a server", false) { state.standalone = true; library() }.apply { backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT); setTextColor(ui.muted); textSize = 13f }, LinearLayout.LayoutParams(-1, -2))
         ui.space(body, 24)
         body.addView(ui.caption("UnisonReader ${packageManager.getPackageInfo(packageName, 0).versionName}").apply { gravity = Gravity.CENTER })
-        (if (name.text.isBlank()) name else password).requestFocus()
+        (if (noServer) address else if (name.text.isBlank()) name else password).requestFocus()
     }
 
     private fun sizeText(bytes: Long): String = when { bytes >= 1L shl 30 -> "%.1f GB".format(bytes / (1024.0 * 1024 * 1024)); bytes >= 1L shl 20 -> "%d MB".format(bytes shr 20); else -> "%d KB".format((bytes shr 10).coerceAtLeast(1)) }

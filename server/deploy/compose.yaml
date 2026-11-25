@@ -1,25 +1,25 @@
-# UnisonServer as a Compose stack, kept in /opt/stacks/unisonserver (see docs/SERVER.md, "Running it").
-# The two library folders come from the .env file Deploy-Server.ps1 writes beside this one (from local.properties).
+# UnisonServer as a Compose stack (see docs/SERVER.md, "Running it").
+# Its settings come from the .env file beside this one: copy .env.example to .env and fill in the two library folders.
 # Both libraries are mounted read-only: the server never writes beside the audiobooks or inside
-# the Calibre library. Everything it produces lives in /opt/stacks/unisonserver/data.
+# the Calibre library. Everything it produces lives in the data folder, ./data unless .env says otherwise.
 services:
   unisonserver:
-    build: ./build
-    image: unisonserver:local
+    # The published image unless .env names another: UNISON_IMAGE=unisonserver:local for one built from a clone.
+    image: ${UNISON_IMAGE:-ghcr.io/wandering-wampa/unison-reader:latest}
     container_name: unisonserver
     ports:
-      - 8095:8080
+      - ${UNISON_PORT:-8095}:8080
     environment:
       - UNISON_WORKERS=4
-      # The zone statistics fall back on when a client sends none (unison.timezone in local.properties).
+      # The zone statistics fall back on when a client sends none.
       - TZ=${TZ:-UTC}
       # New requests on the wanted list are posted to this Discord channel webhook; off when empty. The address is a
-      # secret: it comes from unison.wantedWebhook in local.properties (never in the repository) by way of the .env file.
+      # secret: keep it in .env, never in this file.
       - UNISON_WANTED_WEBHOOK=${UNISON_WANTED_WEBHOOK:-}
     volumes:
-      - ${UNISON_AUDIOBOOKS:?set unison.audiobooks in local.properties}:/audiobooks:ro
-      - ${UNISON_EBOOKS:?set unison.ebooks in local.properties}:/ebooks:ro
-      - /opt/stacks/unisonserver/data:/data
+      - ${UNISON_AUDIOBOOKS:?set UNISON_AUDIOBOOKS in .env to your audiobook folder (see .env.example)}:/audiobooks:ro
+      - ${UNISON_EBOOKS:?set UNISON_EBOOKS in .env to your ebook folder (see .env.example)}:/ebooks:ro
+      - ${UNISON_DATA:-./data}:/data
     restart: unless-stopped
     logging:
       driver: json-file

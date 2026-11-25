@@ -44,9 +44,11 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
     private var calibreStamp = -1L
 
     @Synchronized
-    fun scan(): Int {
+    fun scan(): Int = try { pass() } finally { scanned = true }
+
+    private fun pass(): Int {
         var changed = 0
-        val ebooks = calibreBooks()
+        val ebooks = if (File(config.ebooks, "metadata.db").isFile) calibreBooks() else folderBooks()
         val audio = audiobooks()
         val seen = HashSet<String>()
         for (e in ebooks) {
@@ -94,6 +96,10 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
         metaRefresh = false
         return changed
     }
+
+    /** True once a pass over both libraries has ended since the server started, whether it finished or failed: before that the counts are still growing. */
+    @Volatile var scanned = false
+        private set
 
     /** Plan before mutating: existing pairs and admin choices win; new pairs must be unique both ways. */
     internal data class PairingPlan(val matches: Map<String, EbookEntry>, val duplicates: Set<String>)
@@ -211,9 +217,66 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
 
     // ---- Calibre
 
+    /** What was read from each EPUB in folder mode, by path: the stamp it had then and the entry it gave. */
+    private val folderSeen = HashMap<String, Pair<Long, EbookEntry>>()
+
+    /**
+     * Folder mode, for an ebook folder with no metadata.db: every .epub under it (dot-files skipped), described by
+     * its own OPF. A file is opened again only when its stamp changes. A file that is not a readable EPUB still
+     * becomes an entry (named from its file name), so the parse fails the way an unreadable Calibre EPUB does.
+     * Covers are written under the data folder, never beside the book.
+     */
+    internal fun folderBooks(): List<EbookEntry> {
+        val root = config.ebooks
+        val files = ArrayList<File>()
+        fun walk(dir: File) {
+            for (f in dir.listFiles().orEmpty().sortedBy { it.name.lowercase() }) {
+                if (f.name.startsWith('.')) continue
+                if (f.isDirectory) walk(f) else if (f.isFile && f.extension.equals("epub", ignoreCase = true)) files += f
+            }
+        }
+        if (root.isDirectory) walk(root) else log.warn("The ebook folder $root is not a folder")
+        val out = ArrayList<EbookEntry>()
+        val live = HashSet<String>()
+        for (f in files) {
+            live += f.path
+            val stamp = f.lastModified() xor f.length()
+            val cached = folderSeen[f.path]
+            if (cached != null && cached.first == stamp) { out += cached.second; continue }
+            val entry = folderEntry(f)
+            folderSeen[f.path] = stamp to entry
+            out += entry
+        }
+        folderSeen.keys.retainAll(live)
+        return out
+    }
+
+    private fun folderEntry(file: File): EbookEntry {
+        val parent = file.parentFile
+        val info = try { Ebooks.info(file) } catch (e: Exception) { log.warn("Could not read the metadata of ${file.name}: ${e.message}"); null }
+        val title = info?.title?.ifBlank { null } ?: file.nameWithoutExtension
+        val authors = info?.authors.orEmpty()
+        val author = authors.firstOrNull() ?: if (parent != null && parent != config.ebooks) parent.name else "Unknown"
+        val cover = info?.cover?.let { bytes ->
+            val rel = config.ebooks.toPath().relativize(file.toPath()).toString().replace(File.separatorChar, '/')
+            val target = File(config.data, "ebook-covers/${sha(rel)}.${info.coverExtension}")
+            try {
+                target.parentFile.mkdirs()
+                // Only a changed file is read again, so the cover is written then and no other time.
+                target.writeBytes(bytes)
+                target
+            } catch (e: Exception) { log.warn("Could not keep the cover of ${file.name}: ${e.message}"); null }
+        }
+        val meta = Meta(
+            description = info?.description, publishedYear = info?.year, publisher = info?.publisher, language = info?.language,
+            series = info?.series?.let { listOf(SeriesRef(it, info.seriesIndex)) },
+            authors = authors.ifEmpty { listOf(author).filter { it != "Unknown" } },
+        )
+        return EbookEntry(title, author, file, "epub", cover, meta)
+    }
+
     private fun calibreBooks(): List<EbookEntry> {
         val source = File(config.ebooks, "metadata.db")
-        if (!source.isFile) { log.warn("No metadata.db in ${config.ebooks}; the ebook library is not a Calibre library"); return emptyList() }
         val copy = File(config.data, "calibre-metadata.db")
         Files.copy(source.toPath(), copy.toPath(), StandardCopyOption.REPLACE_EXISTING)
         val out = ArrayList<EbookEntry>()

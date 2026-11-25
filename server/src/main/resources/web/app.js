@@ -302,7 +302,74 @@ const icon = name => ({
 })[name];
 const svg = name => el('span', { html: icon(name), style: 'display:inline-flex' });
 
+// The name this browser signs in under, as the device list shows it.
+const webDevice = () => 'Web · ' + (navigator.userAgentData?.brands?.at(-1)?.brand || navigator.platform || 'browser');
+const signedIn = a => { store.token = a.token; store.user = a.user; localStorage.setItem('unison.cookie', '1'); cache.shelf = null; cache.lists = null; cache.stats = null; location.hash = '#/shelf'; route(); };
+// A server nobody has set up yet answers `needed`; once it says no, it never says yes again, so the answer is kept.
+let setupDone = false;
+async function setupStatus() {
+  if (setupDone) return null;
+  try { const s = await api('/api/setup'); if (!s.needed) setupDone = true; return s.needed ? s : null; } catch { return null; }
+}
+
+// The first run: the built-in admin has no password, so nobody can sign in. Say what the scan found and ask for one.
+async function setupView(s) {
+  $('#top').hidden = true;
+  const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const found = el('div', { class: 'found' });
+  const drawFound = l => {
+    const warn = [];
+    if (l.ebookFolderEmpty) warn.push('The ebook folder is empty. Check that it is the folder you meant to mount.');
+    else if (l.scanned && !l.ebooks) warn.push(l.calibre ? 'The Calibre library has no EPUBs in it yet.' : 'No EPUBs were found in the ebook folder.');
+    if (l.audiobookFolderEmpty) warn.push('The audiobook folder is empty. Check that it is the folder you meant to mount.');
+    else if (l.scanned && !l.audiobooks) warn.push('No audiobooks were found. They are looked for in Author/Title/ folders with the audio files inside.');
+    found.replaceChildren(el('span', { class: 'caption' }, l.scanned ? 'Found in your libraries' : 'Reading your libraries'),
+      el('p', {}, `${count(l.ebooks, 'ebook', 'ebooks')} and ${count(l.audiobooks, 'audiobook', 'audiobooks')}${l.paired ? `, ${l.paired} of them as a pair` : ''}${l.scanned ? '.' : ' so far.'}`),
+      ...(!l.calibre && !l.ebookFolderEmpty ? [el('p', { class: 'muted' }, 'The ebook folder has no metadata.db, so the EPUBs in it are read directly.')] : []),
+      ...warn.map(w => el('p', { class: 'warn' }, w)),
+      ...(l.scanned && warn.length ? [el('p', { class: 'muted' }, 'You can go on and fix the folders afterwards: the libraries are read again every two minutes.')] : []));
+  };
+  drawFound(s.library);
+  // The first scan of a large library takes a while; the counts are kept up to date until it ends or the page is left.
+  const poll = setInterval(async () => {
+    if (!form.isConnected) return clearInterval(poll);
+    try { const now = await api('/api/setup'); if (now.needed) { drawFound(now.library); if (now.library.scanned) clearInterval(poll); } else clearInterval(poll); } catch {}
+  }, 3000);
+  if (s.library.scanned) clearInterval(poll);
+  const key = s.key ? el('input', { id: 'setupKey', autocomplete: 'off', spellcheck: 'false' }) : null;
+  const pass = el('input', { id: 'pass', type: 'password', autocomplete: 'new-password' });
+  const again = el('input', { id: 'pass2', type: 'password', autocomplete: 'new-password' });
+  const err = el('div', { class: 'err', role: 'alert' });
+  const form = el('form', { class: 'signin setup', onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    if (key && !key.value.trim()) { err.textContent = 'The setup key is needed from this address.'; return key.focus(); }
+    if (pass.value.length < s.minPassword) { err.textContent = `A password is at least ${s.minPassword} characters.`; return pass.focus(); }
+    if (pass.value !== again.value) { err.textContent = 'The two passwords are not the same.'; return again.focus(); }
+    try {
+      const a = await api('/api/setup', { method: 'POST', body: { password: pass.value, key: key ? key.value.trim() : '', web: true, device: webDevice() } });
+      clearInterval(poll); setupDone = true; signedIn(a);
+    } catch (x) {
+      // Someone else finished the setup meanwhile (another tab, say): this is then a sign-in like any other.
+      if (!await setupStatus()) { clearInterval(poll); return signIn('This server is already set up. Sign in as admin with the password that was chosen.'); }
+      err.textContent = x.message;
+    }
+  } },
+    el('img', { src: matchMedia('(prefers-color-scheme: dark)').matches ? '/brand/logo-dark.webp' : '/brand/logo-light.webp', alt: 'Unison' }),
+    el('h1', {}, 'Set up this server'),
+    el('p', { class: 'muted' }, 'Nobody can sign in yet. Choose a password for the first account, admin. You add the other people afterwards, on the Admin page.'),
+    found,
+    key ? el('label', { class: 'field' }, 'Setup key', key, el('span', { class: 'hint' }, 'You are not on the server’s own network, so it also asks for its setup key: the contents of the file named token in its data folder.')) : null,
+    el('label', { class: 'field' }, 'Password for admin', pass, el('span', { class: 'hint' }, `${s.minPassword} characters or more.`)),
+    el('label', { class: 'field' }, 'The same password again', again), err,
+    el('button', { class: 'primary', type: 'submit' }, 'Set the password and sign in'));
+  show(form);
+  // Focused here rather than by autofocus, which scrolls a tall card past its own heading.
+  (key || pass).focus({ preventScroll: true });
+}
+
 async function signIn(error) {
+  const setup = await setupStatus();
+  if (setup) return setupView(setup);
   $('#top').hidden = true;
   const name = el('input', { id: 'name', autocomplete: 'username', autofocus: '' });
   const pass = el('input', { id: 'pass', type: 'password', autocomplete: 'current-password' });
@@ -311,8 +378,8 @@ async function signIn(error) {
     e.preventDefault(); err.textContent = '';
     try {
       // web: true asks for the sign-in cookie that lets <img>, <audio> and the beacons authenticate without a header.
-      const a = await api('/api/login', { method: 'POST', body: { name: name.value.trim(), password: pass.value, web: true, device: 'Web · ' + (navigator.userAgentData?.brands?.at(-1)?.brand || navigator.platform || 'browser') } });
-      store.token = a.token; store.user = a.user; localStorage.setItem('unison.cookie', '1'); cache.shelf = null; cache.lists = null; cache.stats = null; location.hash = '#/shelf'; route();
+      const a = await api('/api/login', { method: 'POST', body: { name: name.value.trim(), password: pass.value, web: true, device: webDevice() } });
+      signedIn(a);
     } catch (x) { err.textContent = x.message; }
   } },
     el('img', { src: matchMedia('(prefers-color-scheme: dark)').matches ? '/brand/logo-dark.webp' : '/brand/logo-light.webp', alt: 'Unison' }),
