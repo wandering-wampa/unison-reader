@@ -8,6 +8,8 @@
 #
 # The APKs are the debug-signed sideload builds, as before: they install over earlier versions and keep the library,
 # positions and sign-in. The watch app (wear/) takes its version from the phone app's, so one bump covers both.
+# The server's own version label (Version.NAME in Main.kt, what /api/health answers) is set in the same commit, so
+# the code at a tag always calls itself by that tag's version.
 # The server is deployed on its own with Deploy-Server.ps1.
 param(
     [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
@@ -20,6 +22,7 @@ Set-Location $PSScriptRoot
 . "$PSScriptRoot\Enter-Android.ps1" | Out-Null
 
 $gradleFile = 'app\build.gradle.kts'
+$serverFile = 'server\src\main\kotlin\dev\unison\server\Main.kt'
 $tag = "v$Version"
 function Step($text) { Write-Host "`n== $text" -ForegroundColor Cyan }
 function RunGit { $out = & git.exe @args 2>&1; if ($LASTEXITCODE -ne 0) { throw "git $($args -join ' ') failed: $out" }; $out }
@@ -36,6 +39,8 @@ if ((RunGit rev-parse HEAD) -ne (RunGit rev-parse origin/master)) { Refuse 'mast
 if (RunGit tag --list $tag) { throw "Tag $tag already exists." }
 
 $gradle = Get-Content $gradleFile -Raw
+$server = Get-Content $serverFile -Raw
+if ($server -notmatch 'const val NAME = "[^"]+"') { throw "The server's version label (const val NAME) was not found in $serverFile." }
 $code = [int]([regex]::Match($gradle, 'versionCode = (\d+)').Groups[1].Value)
 $current = [regex]::Match($gradle, 'versionName = "([^"]+)"').Groups[1].Value
 if ([version]$Version -le [version]$current) { throw "Version $Version is not above the current $current." }
@@ -59,6 +64,7 @@ if (-not $Notes) {
 Step 'Build'
 $bumped = $gradle -replace 'versionCode = \d+', "versionCode = $($code + 1)" -replace 'versionName = "[^"]+"', "versionName = `"$Version`""
 Set-Content $gradleFile $bumped -NoNewline
+Set-Content $serverFile ($server -replace 'const val NAME = "[^"]+"', "const val NAME = `"$Version`"") -NoNewline
 try {
     # The packager patches the last APK in place: after a change of edition (or any big removal) the file keeps its old size unless it starts fresh.
     Remove-Item 'app\build\outputs\apk\debug\app-debug.apk', 'app\build\intermediates\incremental\packageDebug' -Recurse -Force -ErrorAction SilentlyContinue
@@ -78,10 +84,12 @@ try {
     Write-Host "$wearApk  $('{0:N0}' -f $wearSize) bytes`nSHA-256 $wearHash"
 } catch {
     Set-Content $gradleFile $gradle -NoNewline
+    Set-Content $serverFile $server -NoNewline
     throw
 }
 if ($DryRun) {
     Set-Content $gradleFile $gradle -NoNewline
+    Set-Content $serverFile $server -NoNewline
     Step 'Dry run: nothing committed, tagged, pushed or published. The release notes would read:'
     Write-Host $Notes
     Write-Warning "app\build\outputs\apk\debug\app-debug.apk now carries version code $($code + 1). Rebuild before installing it: a later build with code $code would not install over it."
@@ -90,7 +98,7 @@ if ($DryRun) {
 
 # ---- Commit, tag, push.
 Step 'Commit and tag'
-RunGit add $gradleFile | Out-Null
+RunGit add $gradleFile $serverFile | Out-Null
 RunGit commit -q -m "UnisonReader $Version" | Out-Null
 RunGit tag -a $tag -m "UnisonReader $Version" | Out-Null
 RunGit push -q origin master | Out-Null
