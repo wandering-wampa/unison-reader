@@ -1394,6 +1394,8 @@ class MainActivity : AppCompatActivity() {
             ui.space(body, 6)
             body.addView(ui.text(when {
                 !work.hasAudio -> "The ebook alone: your server has no audiobook for it. Add it to read it here."
+                work.shelf == "preparing" && work.status.startsWith("Failed: only") -> "Your server found too little of this book's text in the audiobook, so the text cannot follow the narration. The audiobook may be a different book or edition, or the book is not in English. You can still ${if (readable) "read it and listen to it" else "listen to it"}."
+                work.shelf == "preparing" && Server.isFailed(work.status) -> "Your server could not finish matching this book. You can still ${if (readable) "read it and listen to it" else "listen to it"}."
                 work.shelf == "preparing" -> "Your server is still matching the text to the audio. You can read and listen now; the text follows the narration for what is matched so far, and the rest arrives by itself."
                 !readable -> "The audiobook alone: your server has no ebook this app can read for it. Add streams the audio; Download keeps it on this device."
                 else -> "Add streams the audio from your server; Download keeps it on this device."
@@ -2136,6 +2138,7 @@ class MainActivity : AppCompatActivity() {
         val running = PreparationService.running && PreparationService.bookId == b.id
         val percent = if (b.duration > 0) (100 * p.first.coerceAtMost(b.duration) / b.duration).coerceIn(0, 100) else 0
         return when {
+            state.serverWork(b.id) != null && state.syncPending(b.id) && state.syncFailed(b.id).isNotEmpty() -> state.syncFailed(b.id)
             state.serverWork(b.id) != null && state.syncPending(b.id) -> "Syncing on your server · ${"%,d".format(db.anchorCount(b.id))} of ${"%,d".format(b.passages.size)} sentences matched so far"
             state.serverWork(b.id) != null -> if (db.anchorCount(b.id) > 0) "Synced on your server · ${"%,d".format(db.anchorCount(b.id))} sentences matched · ${if (state.serverDownloaded(b.id)) "downloaded" else "streaming"}" else "Waiting for the server's sync"
             running -> p.second.ifBlank { "Syncing" }

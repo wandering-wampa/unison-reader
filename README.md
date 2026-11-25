@@ -18,7 +18,7 @@ I built it for my own household's library and it's shared as it is. The [Status]
 
 You point the server at two folders: a folder of ebooks (a Calibre library, or just EPUB files) and a folder of audiobooks. It reads them and never writes to either. It matches each audiobook to its ebook by title, author and series. The ones it can't match show up in a list, and an admin pairs them by hand.
 
-For each pair, the server runs the audio through a speech model and lines the output up against the book's text. That gives a start and end time for nearly every sentence. A thirty-hour audiobook takes about twenty minutes on a six-core laptop processor. Where the model can't place a sentence it leaves it unmatched. There is no guessing from page position or elapsed time.
+For each pair, the server runs the audio through an English speech model and lines the output up against the book's text, so narration follow is for books in English. That gives a start and end time for nearly every sentence. A thirty-hour audiobook takes about twenty minutes on a six-core laptop processor. Where the model can't place a sentence it leaves it unmatched. There is no guessing from page position or elapsed time.
 
 In the app or the web reader, open the book and press Listen here on any page. Narration starts from that page, the spoken sentence is highlighted, and the page keeps up. Pause and you're looking at the sentence you just heard.
 
@@ -50,7 +50,7 @@ It's in daily use here. For anyone else it's early. Before you spend an evening 
 
 - The server runs from a published Docker image for x86-64 and ARM64. ARM64 has been started under emulation but not run on real hardware.
 - Ebooks are read as EPUBs only. MOBI and AZW3 files are skipped, and a Calibre library is read from its `metadata.db` when there is one.
-- Narration follow only works for English books. The speech model is English, so other languages read and play fine but never sync.
+- Narration follow is for English books. Other languages read and play fine, but their sync ends as failed and says how little of the text matched.
 - The app needs Android 15 or later and is sideloaded. The APKs are debug-signed builds, not store releases.
 - Sign-in is a password. It's throttled and logged, but there's no second factor, so think before you put a server on the open internet.
 - The web client is laid out for desktop browsers, and it loads its font from Google Fonts.
@@ -59,7 +59,7 @@ It's in daily use here. For anyone else it's early. Before you spend an evening 
 ## What you need
 
 - Ebooks as EPUB files in a folder, either a Calibre library (the folder with `metadata.db` in it) or any folder of EPUBs.
-- Audiobooks in `Author/Title/` folders, which is how Audiobookshelf lays them out. M4B, MP3 and the other common formats work.
+- Audiobooks in `Author/Title/` folders, which is how Audiobookshelf lays them out. M4B, MP3 and the other common formats work. Narration follow needs the book to be in English.
 - A machine that runs Docker with the Compose plugin, with both folders mounted read-only. Calibre and Audiobookshelf don't need to be running.
 - An Android 15 or later phone for the app, or just a desktop browser.
 

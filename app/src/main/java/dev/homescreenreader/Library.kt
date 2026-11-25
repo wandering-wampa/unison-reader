@@ -631,6 +631,9 @@ class ReadingState(context: Context) {
     /** True for a book added while the server was still matching its text to its audio: what it has matched since is fetched until it is done. */
     fun syncPending(id: String) = prefs.getBoolean("$id.syncPending", false)
     fun syncPending(id: String, v: Boolean) { prefs.edit().putBoolean("$id.syncPending", v).commit() }
+    /** The server's status text when it gave up matching this book's text to its audio ("Failed: ..."); blank otherwise. */
+    fun syncFailed(id: String): String = prefs.getString("$id.syncFailed", "").orEmpty()
+    fun syncFailed(id: String, v: String) { prefs.edit().putString("$id.syncFailed", v).commit() }
     /** The version of the server's cover this device keeps for a book (0: the library's own; otherwise when an admin chose it). */
     fun coverVersion(id: String): Long = prefs.getLong("$id.coverVersion", 0)
     fun coverVersion(id: String, v: Long) { prefs.edit().putLong("$id.coverVersion", v).commit() }

@@ -25,8 +25,8 @@ android {
         applicationId = "dev.homescreenreader"
         minSdk = 35
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.12.0"
+        versionCode = 15
+        versionName = "0.13.0"
         testInstrumentationRunner = "dev.homescreenreader.ReaderInstrumentation"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
         externalNativeBuild { cmake { targets += "reader"; arguments += listOf("-DCMAKE_BUILD_TYPE=Release", "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON") } }

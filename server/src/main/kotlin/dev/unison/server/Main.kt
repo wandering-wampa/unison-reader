@@ -91,6 +91,7 @@ fun main() {
         wantedPost?.flushSoon()
     }
     // A scan on start and every two minutes (a book that has just landed in the libraries should not wait long to show); anything paired and unsynced is queued as it is found.
+    runCatching { sync.rejudgeSynced() }.onFailure { log.warn("Start-up check of synced works failed: ${it.message}") }
     Thread({
         while (true) {
             try {
@@ -118,5 +119,5 @@ fun main() {
 
 object Version {
     // Kept in step with the app's version at each release (it had stayed at 0.1.0 through nine phases).
-    const val NAME = "0.12.0"
+    const val NAME = "0.13.0"
 }

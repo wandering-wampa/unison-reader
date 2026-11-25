@@ -2,12 +2,14 @@
 
 Versions before 0.11.0 were not published: the first release in this repository is 0.11.0. They are listed for the record.
 
-## Unreleased
+## 0.13.0 (2026-11-25)
 
+- A sync that finds under a fifth of the book's sentences in the audio (another book or edition, or a book that is not in English) now ends as `Failed: only N% of the text was found in the audio` instead of Synced, and the book page explains it and offers Sync again. The app says so too, for a book in the catalogue and for one already added. Works already stored as Synced are corrected when the server starts.
 - A forgotten admin password can be reset: put an empty file named `reset-admin` in the data folder. The server reads it once at start, and the setup page then asks for a new password and the setup key.
+- The apps can be built on Linux with `bootstrap.sh`, and the workflow builds both on every push.
 - The README and the server guide have clearer install steps.
 - A workflow runs the server's tests on every pull request. This changelog and the security and contributing notes are new.
-- The apps can be built on Linux with `bootstrap.sh`, and the workflow builds both on every push.
+- The documents now say that narration follow is for English books.
 
 ## 0.12.0 (2026-11-25)
 

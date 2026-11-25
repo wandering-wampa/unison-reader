@@ -6,6 +6,9 @@ import org.json.JSONObject
 
 /** The app's side of the server: adding a server work to the local library, and keeping the position in step. */
 object Server {
+    /** True for a work status that says the server could not finish matching the book. */
+    fun isFailed(status: String) = status.startsWith("Failed") || status.startsWith("Ebook could not be read")
+
     fun client(state: ReadingState): ServerClient? =
         state.serverUrl.takeIf { it.isNotBlank() && state.serverToken.isNotBlank() }?.let { ServerClient(it, state.serverToken, state.deviceId) }
 
@@ -66,6 +69,7 @@ object Server {
         state.setServerWork(id, work.id, download)
         // Added before the server finished matching text to audio: what it matches from here on is fetched as it comes (refreshSync).
         state.syncPending(id, !audioOnly && tracks.isNotEmpty() && detail.work.shelf != "ready")
+        state.syncFailed(id, if (isFailed(detail.work.status)) detail.work.status else "")
         // Start where the server last saw you, if it has seen you.
         detail.position?.let { p -> state.position(id, p.passage, p.audio); state.markPushed(id, p.passage, p.audio, p.updated) }
         return book
@@ -287,8 +291,13 @@ object Server {
         val client = client(state) ?: return false
         // The work first, the alignment second: when the work says it is done, the alignment fetched after it is whole.
         val detail = runCatching { client.detail(workId) }.getOrNull() ?: return false
-        val anchors = runCatching { client.alignment(workId) }.getOrNull() ?: return false
-        var changed = false
+        // A sync the server gave up on has nothing more to fetch: keep its status for the book's line and ask only the work again.
+        val failed = if (isFailed(detail.work.status)) detail.work.status else ""
+        val turned = state.syncFailed(bookId) != failed
+        if (turned) state.syncFailed(bookId, failed)
+        if (failed.isNotEmpty() && !turned) return false
+        val anchors = runCatching { client.alignment(workId) }.getOrNull() ?: return turned
+        var changed = turned
         Library(context).use { db ->
             val book = db.load(bookId) ?: return false
             if (detail.work.passages > 0 && book.passages.size != detail.work.passages) {

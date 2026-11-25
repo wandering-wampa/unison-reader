@@ -16,11 +16,11 @@ Two folders of books, and somewhere to keep its own data.
 
 Neither Calibre nor Audiobookshelf has to be running: only the folders matter, and both are mounted
 read-only (see "The libraries are never written to" below). A book with one half is still served: an ebook
-alone can be read and an audiobook alone can be played. Following the narration needs both.
+alone can be read and an audiobook alone can be played. Following the narration needs both, and the book has to be in English.
 
 The machine can be anything that runs Docker; it has been run on x86-64 Linux. Aligning a book is the heavy
 part and happens once: a worker runs at about 100 times real time on a six-core laptop processor (i5-11400H),
-so a thirty-hour audiobook takes about twenty minutes of one worker. The speech model is 21 MB, and each
+so a thirty-hour audiobook takes about twenty minutes of one worker. The speech model is English and 21 MB, and each
 worker holds one chapter of audio in memory (under 200 MB for an hour-long chapter).
 
 ## Running it
@@ -285,7 +285,11 @@ same sentence ids.
 **Sync.** The ported engine. A worker pool aligns units in parallel (one ONNX session per worker,
 `threads = cores / workers`), decoding each unit's audio span with `ffmpeg -ss -t -f f32le -ac 1
 -ar 16000`. A paired work syncs automatically when first seen and whenever either file changes;
-progress is visible through the API. Alignment VERSION is shared with the app through `core`.
+progress is visible through the API. Alignment VERSION is shared with the app through `core`. When every
+unit is done but fewer than a fifth of the book's sentences were found in the audio (the audiobook is another
+book or edition, or the book is not in English), the status is `Failed: only N% of the text was found in the
+audio` and the work stays on the Getting ready shelf; a server that already held such a work as Synced
+changes it the next time it starts. Sync again (`POST /api/works/{id}/sync?restart=true`) tries it over.
 
 **Accounts.** `users` (name, PBKDF2-SHA256 password hash with a per-user salt, role admin or member),
 `tokens` (one per signed-in device, revocable) and `shelf` (user, work, state reading/queued/finished,

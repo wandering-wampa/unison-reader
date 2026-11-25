@@ -21,6 +21,18 @@ import kotlinx.serialization.Serializable
 import org.slf4j.LoggerFactory
 
 /**
+ * What a finished sync is called. A work whose units are all done is poorly matched when under a fifth of its
+ * sentences were found; the Android app judges its own on-device sync by the same rule (`poorlyMatched` in
+ * MainActivity), so keep the two in step. The status starts with "Failed" on purpose: released apps show such a
+ * status as it is, and the library scan leaves a Failed work alone.
+ */
+object SyncVerdict {
+    fun poorlyMatched(anchors: Int, passages: Int) = passages > 0 && anchors * 5 < passages
+    fun status(anchors: Int, passages: Int) =
+        if (poorlyMatched(anchors, passages)) "Failed: only ${100 * anchors / passages}% of the text was found in the audio" else "Synced"
+}
+
+/**
  * Runs the shared sync engine over paired works with a pool of workers, one ONNX session each, so
  * several chapters align at once. Audio is decoded per piece with ffmpeg from the read-only library.
  */
@@ -51,6 +63,29 @@ class SyncService(private val config: Config, private val catalog: Catalog, priv
         for (w in catalog.works()) if (w.hasEbook && w.hasAudio && w.passages > 0 && w.status != "Synced" && !w.status.startsWith("Failed") && !jobs.containsKey(w.id)) request(w.id)
     }
 
+    /**
+     * Once per start: a work stored as "Synced" whose finished alignment matched under a fifth of its sentences
+     * (servers before this rule kept such works as Synced) gets the failed status. Reads only the database: no
+     * re-alignment, no book is opened. Leaves a work that is being synced alone. Returns the works changed.
+     */
+    @Synchronized
+    fun rejudgeSynced(): Int {
+        var changed = 0
+        for (w in catalog.works()) {
+            if (!w.hasEbook || !w.hasAudio || w.status != "Synced" || jobs.containsKey(w.id)) continue
+            val units = catalog.units(w.id)
+            if (units.isEmpty() || !units.all { it.done }) continue
+            val anchors = catalog.anchorCount(w.id)
+            if (!SyncVerdict.poorlyMatched(anchors, w.passages)) continue
+            val status = SyncVerdict.status(anchors, w.passages)
+            catalog.setStatus(w.id, status)
+            log.info("${w.title}: was Synced, now $status")
+            changed++
+        }
+        log.info("Start-up check of synced works: $changed changed")
+        return changed
+    }
+
     /** Plans a work's units and submits the ones not yet done. */
     @Synchronized
     fun request(id: String): Boolean {
@@ -62,7 +97,7 @@ class SyncService(private val config: Config, private val catalog: Catalog, priv
         val plan = SyncPlan.units(book)
         catalog.planUnits(id, plan, SyncPlan.VERSION)
         val pending = catalog.units(id).filter { !it.done }
-        if (pending.isEmpty()) { catalog.setStatus(id, "Synced"); return true }
+        if (pending.isEmpty()) { catalog.setStatus(id, SyncVerdict.status(catalog.anchorCount(id), work.passages)); return true }
         val job = Job(work, book, BookText(book), plan.size, System.currentTimeMillis())
         job.remaining.set(pending.size)
         job.done.set(plan.size - pending.size)
@@ -112,7 +147,7 @@ class SyncService(private val config: Config, private val catalog: Catalog, priv
         val units = catalog.units(id)
         val status = when {
             job.failed.get() -> catalog.work(id)?.status ?: "Failed"
-            units.all { it.done } -> "Synced"
+            units.all { it.done } -> SyncVerdict.status(catalog.anchorCount(id), catalog.work(id)?.passages ?: job.work.passages)
             job.cancel.get() -> "Paused"
             else -> "Partly synced"
         }

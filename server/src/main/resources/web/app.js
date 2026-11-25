@@ -66,7 +66,7 @@ function sentenceAt(id, ms) {
 }
 async function works() { return cache.works || (cache.works = rows(await api('/api/works'))); }
 async function shelf(force) { if (force || !cache.shelf) cache.shelf = await api('/api/me/shelf'); return cache.shelf; }
-async function detail(id, force) { if (force || !cache.details.has(id)) { const d = await api(`/api/works/${id}`); norm(d.work); cache.details.set(id, d); } return cache.details.get(id); }
+async function detail(id, force) { if (force || !cache.details.has(id)) { const d = await api(`/api/works/${id}`); norm(d.work).sync = d.shelf; cache.details.set(id, d); } return cache.details.get(id); }
 
 // Chapters as the book names them: the ebook's table of contents placed in the audio through the alignment.
 // Falls back to the audio file's own chapter marks (often just numbers, and off by the front matter) and then to tracks.
@@ -291,7 +291,9 @@ function card(w, line) {
     typeof line === 'number' ? el('div', { class: 'bar' + (line >= 100 ? ' done' : '') }, el('i', { style: `width:${line}%` })) : null,
     typeof line === 'string' ? el('div', { class: 's' }, line) : null);
 }
-const syncLine = w => w.sync === 'ready' ? 'Synced' : w.sync === 'preparing' ? (w.syncedPercent > 0 ? `Syncing · ${w.syncedPercent}%` : w.status || 'Waiting to sync') : w.hasAudio ? 'Audiobook only' : 'Ebook only';
+// A sync that ended badly says so in its status; the percent it holds is the share of the audio measured, not progress.
+const syncFailed = w => /^(Failed|Ebook could not be read)/.test(w.status || '');
+const syncLine = w => w.sync === 'ready' ? 'Synced' : w.sync === 'preparing' ? (syncFailed(w) ? w.status : w.syncedPercent > 0 ? `Syncing · ${w.syncedPercent}%` : w.status || 'Waiting to sync') : w.hasAudio ? 'Audiobook only' : 'Ebook only';
 const progressOf = (w, pos) => pos ? (w.passages > 0 && pos.passage > 0 ? Math.round(pos.passage * 100 / w.passages) : w.duration > 0 ? Math.round(pos.audio * 100 / w.duration) : 0) : 0;
 const listRow = (href, cover, title, sub) => el('a', { class: 'row', href }, cover ? el('img', { class: 'cover', src: cover, alt: '', loading: 'lazy' }) : el('div', { class: 'cover' }), el('div', { class: 'grow' }, el('div', { class: 't' }, title), el('div', { class: 's' }, sub)), el('span', { class: 'muted' }, '›'));
 const icon = name => ({
@@ -416,7 +418,7 @@ async function shelfView() {
   const finished = mine.filter(e => e.state === 'finished').map(e => ({ e, w: byId.get(e.work) })).filter(x => x.w).sort((a, b) => (b.e.finishedAt || 0) - (a.e.finishedAt || 0));
   const onShelf = new Set(mine.map(e => e.work));
   const ready = all.filter(w => w.sync === 'ready' && !onShelf.has(w.id));
-  const preparing = all.filter(w => w.sync === 'preparing').sort((a, b) => b.syncedPercent - a.syncedPercent);
+  const preparing = all.filter(w => w.sync === 'preparing').sort((a, b) => syncFailed(a) - syncFailed(b) || b.syncedPercent - a.syncedPercent);
   const missing = all.filter(w => w.hasEbook !== w.hasAudio);
   const nodes = [];
   // Continue your story is a book already begun; a shelved book not yet opened waits in On my shelf.
@@ -451,7 +453,7 @@ async function shelfView() {
   nodes.push(el('div', { class: 'grid' }, ready.slice(0, 14).map(w => card(w))));
   const pair = el('div', { class: 'pair', style: 'margin-top:44px' });
   pair.append(el('div', {}, el('div', { class: 'section', style: 'margin-top:0' }, el('h2', {}, 'Getting ready'), el('span', { class: 'muted' }, preparing.length)),
-    preparing.length ? el('div', { class: 'list' }, preparing.slice(0, 5).map(w => el('a', { class: 'row', href: `#/book/${w.id}` }, coverOf(w), el('div', { class: 'grow' }, el('div', { class: 't' }, w.title), el('div', { class: 's' }, el('span', { class: 'dot warn' }), syncLine(w)), w.syncedPercent > 0 ? el('div', { class: 'bar warn', style: 'margin-top:6px;max-width:220px' }, el('i', { style: `width:${w.syncedPercent}%` })) : null))),
+    preparing.length ? el('div', { class: 'list' }, preparing.slice(0, 5).map(w => el('a', { class: 'row', href: `#/book/${w.id}` }, coverOf(w), el('div', { class: 'grow' }, el('div', { class: 't' }, w.title), el('div', { class: 's' }, el('span', { class: 'dot warn' }), syncLine(w)), w.syncedPercent > 0 && !syncFailed(w) ? el('div', { class: 'bar warn', style: 'margin-top:6px;max-width:220px' }, el('i', { style: `width:${w.syncedPercent}%` })) : null))),
       preparing.length > 5 ? el('a', { class: 'row', href: '#/books', style: 'justify-content:center;color:var(--accent);font-weight:500' }, `All ${preparing.length} in Books ›`) : null) : el('p', { class: 'muted' }, 'Nothing syncing right now.')));
   pair.append(el('div', {}, el('div', { class: 'section', style: 'margin-top:0' }, el('h2', {}, 'Missing a piece'), el('span', { class: 'muted' }, missing.length)),
     el('div', { class: 'list' }, missing.filter(w => onShelf.has(w.id)).concat(missing.filter(w => !onShelf.has(w.id))).slice(0, 5).map(w => el('a', { class: 'row', href: `#/book/${w.id}` }, coverOf(w), el('div', { class: 'grow' }, el('div', { class: 't' }, w.title), el('div', { class: 's' }, w.hasAudio ? 'Audiobook only · pair it with an ebook' : 'Ebook only · an audiobook would pair')), el('span', { class: 'muted' }, '›'))),
@@ -538,8 +540,8 @@ async function bookPage(id) {
   if (w.narrators?.length) meta.push(el('div', { class: 'meta' }, 'Read by ', ...w.narrators.flatMap((n, i) => [i ? ', ' : '', el('a', { href: `#/narrator/${encodeURIComponent(n)}` }, n)])));
   if (w.series?.length) meta.push(el('div', { class: 'meta' }, 'Series: ', ...w.series.flatMap((s, i) => [i ? ', ' : '', el('a', { href: `#/series/${encodeURIComponent(s.name)}` }, s.name + (s.sequence ? ` #${+s.sequence}` : ''))])));
   meta.push(el('div', { class: 'meta' }, [w.hasAudio ? fmtClock(w.duration) + ' of audio' : null, w.passages ? w.passages.toLocaleString() + ' sentences' : null, w.publishedYear || null, w.rating ? '★ ' + w.rating.toFixed(1) : null].filter(Boolean).join('  ·  ')));
-  const syncing = d.shelf === 'preparing';
-  meta.push(el('div', { class: 'meta' }, w.audioOnly ? el('span', { class: 'good' }, el('span', { class: 'dot' }), 'Audio only · ready to listen') : d.shelf === 'ready' ? el('span', { class: 'good' }, el('span', { class: 'dot' }), `Synced · ${d.sentencesAligned.toLocaleString()} sentences matched`) : syncing ? el('span', {}, el('span', { class: 'dot warn' }), syncLine(w), w.syncedPercent > 0 ? ` · ${d.units.filter(u => u.done).length} of ${d.units.length} chapters measured` : '') : el('span', {}, el('span', { class: 'dot off' }), w.hasAudio && w.hasEbook ? 'Not synced yet' : w.hasAudio ? 'Audiobook only · pair it with an ebook below' : 'Ebook only · an audiobook would pair')));
+  const failed = syncFailed(w), syncing = d.shelf === 'preparing' && !failed;
+  meta.push(el('div', { class: 'meta' }, w.audioOnly ? el('span', { class: 'good' }, el('span', { class: 'dot' }), 'Audio only · ready to listen') : d.shelf === 'ready' ? el('span', { class: 'good' }, el('span', { class: 'dot' }), `Synced · ${d.sentencesAligned.toLocaleString()} sentences matched`) : d.shelf === 'preparing' ? el('span', {}, el('span', { class: 'dot warn' }), syncLine(w), !failed && w.syncedPercent > 0 ? ` · ${d.units.filter(u => u.done).length} of ${d.units.length} chapters measured` : '') : el('span', {}, el('span', { class: 'dot off' }), w.hasAudio && w.hasEbook ? 'Not synced yet' : w.hasAudio ? 'Audiobook only · pair it with an ebook below' : 'Ebook only · an audiobook would pair')));
   if (w.genres?.length) meta.push(el('div', { class: 'meta' }, w.genres.join(' · ')));
   if (wanted || inLists.length) meta.push(el('div', { class: 'meta' }, 'In ', ...[...(wanted ? [lists.find(c => c.kind === 'want')] : []), ...inLists].flatMap((c, i) => [i ? ', ' : '', el('a', { href: listHref(c) }, c.name)])));
   if (store.user?.role === 'admin' && w.edited?.length) meta.push(el('div', { class: 'meta' }, `Details edited in Unison: ${w.edited.map(f => ({ publishedYear: 'year', description: 'about' })[f] || f).join(', ')}`));
@@ -549,9 +551,9 @@ async function bookPage(id) {
   const here = pos?.audio ? chapterAt(d, pos.audio) : null;
   // Sync and pairing: the admin's chores, available to anyone in the household.
   const syncBox = (w.hasAudio && w.hasEbook) ? el('div', { class: 'box' }, el('span', { class: 'caption' }, 'Sync on the server'),
-    el('div', { class: 'muted', style: 'font-size:14px' }, d.shelf === 'ready' ? 'Every chapter is measured. Sync again only if the ebook or audiobook file changed.' : syncing ? `${d.units.filter(u => u.done).length} of ${d.units.length} chapters measured so far. The server works through the queue on its own.` : 'Both files are here; the server has not measured this book yet.'),
+    el('div', { class: 'muted', style: 'font-size:14px' }, d.shelf === 'ready' ? 'Every chapter is measured. Sync again only if the ebook or audiobook file changed.' : failed ? (w.status.startsWith('Failed: only') ? "The server found too little of this book's text in the audiobook, so the text cannot follow the narration. The audiobook may be a different book or edition, or the book is not in English. You can still read it and listen to it." : 'The server could not finish measuring this book.') : syncing ? `${d.units.filter(u => u.done).length} of ${d.units.length} chapters measured so far. The server works through the queue on its own.` : 'Both files are here; the server has not measured this book yet.'),
     el('div', { class: 'actions', style: 'margin-top:12px' },
-      d.shelf === 'ready' ? el('button', { class: 'ghost', onclick: async e => { if (!confirm('Measure the whole book again? Reading positions are kept.')) return; e.target.disabled = true; await api(`/api/works/${id}/sync?restart=true`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing again'); bookPage(id); } }, 'Sync again') : el('button', { class: 'primary', style: 'padding:9px 16px', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing'); bookPage(id); } }, 'Sync now'),
+      d.shelf === 'ready' || w.status.startsWith('Failed: only') ? el('button', { class: 'ghost', onclick: async e => { if (!confirm('Measure the whole book again? Reading positions are kept.')) return; e.target.disabled = true; await api(`/api/works/${id}/sync?restart=true`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing again'); bookPage(id); } }, 'Sync again') : el('button', { class: 'primary', style: 'padding:9px 16px', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing'); bookPage(id); } }, 'Sync now'),
       syncing ? el('button', { class: 'ghost', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'DELETE' }).catch(x => toast(x.message)); toast('Pausing after the current chapter'); setTimeout(() => bookPage(id), 1500); } }, 'Pause syncing') : null)) : null;
   let pairBox = null;
   if (w.hasAudio && !w.hasEbook && w.audioOnly) {
