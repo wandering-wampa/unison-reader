@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory
  * stored, so the database alone cannot sign anyone in. A token that goes unused for a while expires
  * (thirty days for a browser, a year for the app), and each is revocable from the device list. The
  * install's original token belongs to the built-in admin on a fresh install only; first-run setup revokes it,
- * and a server that already has a password never seeds it. On a server set up before that it is revoked like any other device. Sign-ins and account changes are audited.
+ * and a server that already has a password never seeds it. On a server set up before that it is revoked like any other device. A forgotten admin password is reset by a file (see `Setup`). Sign-ins and account changes are audited.
  */
 class Users(private val db: Connection, private val legacyToken: String) {
     private val log = LoggerFactory.getLogger("Users")
@@ -122,19 +122,44 @@ class Users(private val db: Connection, private val legacyToken: String) {
     fun hasPassword(id: Long): Boolean = query("SELECT hash FROM users WHERE id = ?", id) { it.getString(1) }.firstOrNull().orEmpty().isNotBlank()
 
     /** True while no account has a password, which is a server nobody has set up: nobody can sign in by name. */
-    fun setupNeeded(): Boolean = query("SELECT COUNT(*) FROM users WHERE hash != ''") { it.getInt(1) }.first() == 0
+    fun setupNeeded(): Boolean = query("SELECT COUNT(*) FROM users WHERE hash != ''") { it.getInt(1) }.first() == 0 || resetPending()
+
+    /** Set by [resetAdmin] and kept in memory only: a restart forgets it, and the owner makes the file again. */
+    @Volatile private var resetFlag = false
+
+    /** True after a reset of the built-in admin's password, until a new one is set. The setup then needs the key from every address. */
+    fun resetPending(): Boolean = resetFlag && !hasPassword(1)
+
+    /**
+     * Forgets the built-in admin's password: its hash and salt are cleared and every device of that account is signed out.
+     * Other accounts, and the admin's shelf, places and marks, are left alone. Until a new password is set (`setUp`)
+     * the server counts as needing setup even though other accounts can sign in. False, and nothing changed, when no
+     * account has a password at all: that is a server nobody has set up, and its first run is the ordinary one.
+     */
+    fun resetAdmin(detail: String): Boolean {
+        val done = synchronized(db) {
+            if (query("SELECT COUNT(*) FROM users WHERE hash != ''") { it.getInt(1) }.first() == 0) return@synchronized false
+            exec("UPDATE users SET hash = '', salt = '' WHERE id = 1")
+            revokeAll(1)
+            resetFlag = true
+            true
+        }
+        if (done) audit("admin", "password reset", "", detail)
+        return done
+    }
 
     /**
      * The first run: gives the built-in admin its password, once. The check and the change are one statement, so of
-     * two requests arriving together only one succeeds; false when some account already had a password.
+     * two requests arriving together only one succeeds; false when some account already had a password. After a
+     * reset ([resetAdmin]) other accounts have passwords, so the check is then only that the admin has none.
      */
     fun setUp(password: String): Boolean {
         require(password.length >= MIN_PASSWORD) { "A password is at least $MIN_PASSWORD characters" }
         val salt = salt()
         return synchronized(db) {
-            val done = exec("UPDATE users SET hash = ?, salt = ? WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM users WHERE hash != '')", hash(password, salt), salt) == 1
+            val done = exec("UPDATE users SET hash = ?, salt = ? WHERE id = 1 AND hash = '' AND (? OR NOT EXISTS (SELECT 1 FROM users WHERE hash != ''))", hash(password, salt), salt, resetFlag) == 1
             // Setting up ends the install's first key: from here on it signs nobody in.
-            if (done) exec("DELETE FROM tokens WHERE token = ?", sha256(legacyToken))
+            if (done) { exec("DELETE FROM tokens WHERE token = ?", sha256(legacyToken)); resetFlag = false }
             done
         }
     }

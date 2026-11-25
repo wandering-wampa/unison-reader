@@ -305,7 +305,7 @@ const svg = name => el('span', { html: icon(name), style: 'display:inline-flex' 
 // The name this browser signs in under, as the device list shows it.
 const webDevice = () => 'Web · ' + (navigator.userAgentData?.brands?.at(-1)?.brand || navigator.platform || 'browser');
 const signedIn = a => { store.token = a.token; store.user = a.user; localStorage.setItem('unison.cookie', '1'); cache.shelf = null; cache.lists = null; cache.stats = null; location.hash = '#/shelf'; route(); };
-// A server nobody has set up yet answers `needed`; once it says no, it never says yes again, so the answer is kept.
+// A server nobody has set up yet answers `needed`; once it says no, it never says yes again while this page is open (a reset happens only at start-up), so the answer is kept.
 let setupDone = false;
 async function setupStatus() {
   if (setupDone) return null;
@@ -329,20 +329,20 @@ async function setupView(s) {
       ...warn.map(w => el('p', { class: 'warn' }, w)),
       ...(l.scanned && warn.length ? [el('p', { class: 'muted' }, 'You can go on and fix the folders afterwards: the libraries are read again every two minutes.')] : []));
   };
-  drawFound(s.library);
+  if (!s.reset) drawFound(s.library);
   // The first scan of a large library takes a while; the counts are kept up to date until it ends or the page is left.
   const poll = setInterval(async () => {
     if (!form.isConnected) return clearInterval(poll);
     try { const now = await api('/api/setup'); if (now.needed) { drawFound(now.library); if (now.library.scanned) clearInterval(poll); } else clearInterval(poll); } catch {}
   }, 3000);
-  if (s.library.scanned) clearInterval(poll);
+  if (s.reset || s.library.scanned) clearInterval(poll);
   const key = s.key ? el('input', { id: 'setupKey', autocomplete: 'off', spellcheck: 'false' }) : null;
   const pass = el('input', { id: 'pass', type: 'password', autocomplete: 'new-password' });
   const again = el('input', { id: 'pass2', type: 'password', autocomplete: 'new-password' });
   const err = el('div', { class: 'err', role: 'alert' });
   const form = el('form', { class: 'signin setup', onsubmit: async e => {
     e.preventDefault(); err.textContent = '';
-    if (key && !key.value.trim()) { err.textContent = 'The setup key is needed from this address.'; return key.focus(); }
+    if (key && !key.value.trim()) { err.textContent = s.reset ? 'The setup key is needed to choose a new admin password.' : 'The setup key is needed from this address.'; return key.focus(); }
     if (pass.value.length < s.minPassword) { err.textContent = `A password is at least ${s.minPassword} characters.`; return pass.focus(); }
     if (pass.value !== again.value) { err.textContent = 'The two passwords are not the same.'; return again.focus(); }
     try {
@@ -355,20 +355,21 @@ async function setupView(s) {
     }
   } },
     el('img', { src: matchMedia('(prefers-color-scheme: dark)').matches ? '/brand/logo-dark.webp' : '/brand/logo-light.webp', alt: 'Unison' }),
-    el('h1', {}, 'Set up this server'),
-    el('p', { class: 'muted' }, 'Nobody can sign in yet. Choose a password for the first account, admin. You add the other people afterwards, on the Admin page.'),
-    found,
-    key ? el('label', { class: 'field' }, 'Setup key', key, el('span', { class: 'hint' }, 'You are not on the server’s own network, so it also asks for its setup key: the contents of the file named token in its data folder.')) : null,
+    el('h1', {}, s.reset ? 'Choose a new admin password' : 'Set up this server'),
+    el('p', { class: 'muted' }, s.reset ? 'The admin password was reset on the server. Choose a new one for admin. The other accounts are as they were.' : 'Nobody can sign in yet. Choose a password for the first account, admin. You add the other people afterwards, on the Admin page.'),
+    s.reset ? null : found,
+    key ? el('label', { class: 'field' }, 'Setup key', key, el('span', { class: 'hint' }, s.reset ? 'The contents of the file named token in the server’s data folder.' : 'You are not on the server’s own network, so it also asks for its setup key: the contents of the file named token in its data folder.')) : null,
     el('label', { class: 'field' }, 'Password for admin', pass, el('span', { class: 'hint' }, `${s.minPassword} characters or more.`)),
     el('label', { class: 'field' }, 'The same password again', again), err,
-    el('button', { class: 'primary', type: 'submit' }, 'Set the password and sign in'));
+    el('button', { class: 'primary', type: 'submit' }, 'Set the password and sign in'),
+    s.reset ? el('button', { type: 'button', class: 'link', onclick: () => { clearInterval(poll); signIn('', true); } }, 'Sign in with another account') : null);
   show(form);
   // Focused here rather than by autofocus, which scrolls a tall card past its own heading.
   (key || pass).focus({ preventScroll: true });
 }
 
-async function signIn(error) {
-  const setup = await setupStatus();
+async function signIn(error, skipSetup) {
+  const setup = skipSetup ? null : await setupStatus();
   if (setup) return setupView(setup);
   $('#top').hidden = true;
   const name = el('input', { id: 'name', autocomplete: 'username', autofocus: '' });

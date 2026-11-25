@@ -100,6 +100,100 @@ class SetupTest {
         } finally { dir.deleteRecursively() }
     }
 
+    // ---- the reset of a forgotten admin password
+
+    private fun reset(block: (File, Config, Catalog) -> Unit) {
+        val dir = Files.createTempDirectory("unison-reset-").toFile()
+        val catalog = Catalog(File(dir, "catalog.db"))
+        try { block(dir, Config(dir, dir, dir, dir, key, 1, 0), catalog) } finally { catalog.connection.close(); dir.deleteRecursively() }
+    }
+
+    @Test fun `without the file nothing changes`() = reset { dir, config, catalog ->
+        val users = Users(catalog.connection, key)
+        users.setUp("a first password")
+        assertFalse(Setup.resetAdmin(config, users))
+        assertFalse(users.setupNeeded())
+        assertFalse(users.resetPending())
+        assertNotNull(users.login("admin", "a first password", "test"))
+        assertTrue(users.auditLog().none { it.action == "password reset" })
+    }
+
+    @Test fun `the file resets the admin and nobody else`() = reset { dir, config, catalog ->
+        val users = Users(catalog.connection, key)
+        users.setUp("a first password")
+        users.create("someone", "their password", "member")
+        val device = users.login("admin", "a first password", "test")!!.second
+        users.shelve(1, "a-work", "reading", null)
+        File(dir, "reset-admin").writeText("ignored")
+        assertTrue(Setup.resetAdmin(config, users))
+        assertFalse(File(dir, "reset-admin").exists(), "the file is gone")
+        assertTrue(users.setupNeeded())
+        assertTrue(users.resetPending())
+        assertFalse(users.hasPassword(1))
+        assertNull(users.login("admin", "a first password", "test"))
+        assertNull(users.authenticate(device), "signed out everywhere")
+        assertNotNull(users.login("someone", "their password", "test"), "the other account still signs in")
+        assertEquals(1, users.shelf(1).size, "the admin's shelf stays")
+        val entry = users.auditLog().first { it.action == "password reset" }
+        assertEquals("admin", entry.user); assertEquals("", entry.address); assertTrue("reset-admin" in entry.detail)
+        assertNull(users.authenticate(key), "the key is not a sign-in during a reset")
+        assertFalse(users.keyActive())
+        // The file is gone, so a second start does not reset again.
+        assertFalse(Setup.resetAdmin(config, users))
+    }
+
+    @Test fun `a reset is completed once, with a new password`() = reset { dir, config, catalog ->
+        val users = Users(catalog.connection, key)
+        users.setUp("a first password")
+        users.create("someone", "their password", "member")
+        File(dir, "token").writeText(key)
+        File(dir, "reset-admin").writeText("")
+        Setup.resetAdmin(config, users)
+        Setup.dropKeyFile(config, users)
+        assertTrue(File(dir, "token").isFile, "while the reset is pending the key file stays")
+        assertFailsWith<IllegalArgumentException> { users.setUp("short") }
+        assertTrue(users.resetPending(), "a refused password changes nothing")
+        assertTrue(users.setUp("a new password"))
+        assertFalse(users.setUp("another password"), "of two requests only one wins")
+        assertFalse(users.setupNeeded())
+        assertFalse(users.resetPending())
+        assertNotNull(users.login("admin", "a new password", "test"))
+        assertNull(users.login("admin", "a first password", "test"))
+        assertNull(users.authenticate(key))
+        Setup.dropKeyFile(config, users)
+        assertFalse(File(dir, "token").exists(), "the key file is removed as after a first run")
+        assertFalse(users.setUp("a third password"), "the setup is closed again")
+    }
+
+    @Test fun `a restart in the middle of a reset forgets it`() {
+        val dir = Files.createTempDirectory("unison-reset-").toFile()
+        try {
+            val config = Config(dir, dir, dir, dir, key, 1, 0)
+            val first = Catalog(File(dir, "catalog.db"))
+            val users = Users(first.connection, key)
+            users.setUp("a first password"); users.create("someone", "their password", "member")
+            File(dir, "reset-admin").writeText("")
+            Setup.resetAdmin(config, users)
+            first.connection.close()
+            val second = Catalog(File(dir, "catalog.db"))
+            val again = Users(second.connection, key)
+            assertFalse(again.setupNeeded(), "the pending state is only in memory")
+            assertFalse(again.setUp("a new password"), "and the admin is not given a password behind another account")
+            second.connection.close()
+        } finally { dir.deleteRecursively() }
+    }
+
+    @Test fun `the file on a server nobody has set up does nothing`() = reset { dir, config, catalog ->
+        val users = Users(catalog.connection, key)
+        File(dir, "reset-admin").writeText("")
+        assertFalse(Setup.resetAdmin(config, users))
+        assertFalse(File(dir, "reset-admin").exists())
+        assertTrue(users.setupNeeded())
+        assertFalse(users.resetPending(), "an ordinary first run")
+        assertEquals("admin", users.authenticate(key)?.name, "and the first key still signs in")
+        assertTrue(users.auditLog().none { it.action == "password reset" })
+    }
+
     @Test fun `private and public addresses`() {
         for (a in listOf("127.0.0.1", "127.8.9.10", ip(10, 0, 0, 5), ip(172, 16, 0, 1), ip(172, 31, 255, 254), ip(192, 168, 1, 20), "169.254.3.4", "::1", "0:0:0:0:0:0:0:1", "fd12:3456:789a::1", "fc00::1", "fe80::1", "fe80::1%eth0", "[::1]", "::ffff:${ip(192, 168, 1, 20)}"))
             assertTrue(Setup.private(a), a)

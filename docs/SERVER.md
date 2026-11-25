@@ -29,10 +29,17 @@ The server runs as one container from the image `ghcr.io/wandering-wampa/unison-
 ARM64. Docker with the Compose plugin is all the machine needs: no JDK, Android SDK or other tools, on Linux,
 macOS or Windows.
 
-1. Make an empty folder for the stack and put two files in it, both from `server/deploy/` in this repository:
-   `compose.yaml` as it is, and `.env.example` saved as `.env`.
+1. Make an empty folder for the stack, open a terminal in it and download the two files from `server/deploy/` in
+   the public repository, `compose.yaml` as it is and `.env.example` saved as `.env` (in Windows PowerShell,
+   type `curl.exe` in place of `curl`):
 
-2. In the `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two library folders.
+   ```sh
+   curl -fsSLO https://raw.githubusercontent.com/wandering-wampa/unison-reader/main/server/deploy/compose.yaml
+   curl -fsSL https://raw.githubusercontent.com/wandering-wampa/unison-reader/main/server/deploy/.env.example -o .env
+   ```
+
+2. In the `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two library folders. On Windows write the
+   paths with forward slashes, such as `C:/Books/audiobooks`.
 
 3. In that folder:
 
@@ -40,7 +47,9 @@ macOS or Windows.
    docker compose up -d
    ```
 
-   The first run pulls the image.
+   The first run pulls the image, about 340 MB for x86-64. The command is `docker compose` from the Compose
+   plugin, not the older `docker-compose`. On Linux, `docker` may need `sudo` unless your user is in the
+   `docker` group.
 
 4. Open `http://<host>:8095` in a browser and do the first-run setup (next section).
 
@@ -48,6 +57,10 @@ Only those two lines of `.env` have to change. With the rest as `.env.example` h
 data in `data/` beside `compose.yaml` (made on the first start) and the web client is at `http://<host>:8095`.
 When either library folder is not set, Compose refuses to start and names the missing line. The file can hold a
 secret (the webhook), so make it readable by you alone.
+
+If port 8095 is already used on the host, set `UNISON_PORT` in the `.env` to a free one and use that in the
+address. Other machines reach the server only if the host's firewall lets that port through. The first scan
+goes on for a while after the setup page opens and the library fills in as it runs.
 
 To update, pull the image again and run `docker compose up -d` again in that folder: the container is replaced
 and the data folder is left as it is. To stay on one release, set `UNISON_IMAGE` in the `.env` to the image with that
@@ -139,7 +152,8 @@ Then it asks for the password for `admin` twice, eight characters or more, and s
 adds the other people in the house, each with a role (admin or member) and a password they can change.
 
 Setup works once. From the moment any account has a password the setup page is no longer shown,
-`POST /api/setup` answers 409, and the sign-in form is the only way in.
+`POST /api/setup` answers 409, and the sign-in form is the only way in. The one way to open it again is
+the reset for a forgotten admin password, below.
 
 #### Who may do the setup
 
@@ -178,6 +192,33 @@ devices as `server`. Completing the setup ends it: the server signs that device 
 `data/token`, and a restart does not make a new one. From then on only passwords and the device tokens they
 produce get in. A server that was set up before this behaviour keeps its key until its `server` device is signed
 out on the Account page.
+
+#### A forgotten admin password
+
+This is in versions after 0.12.0; the published image 0.12.0 does not have it. If nobody can sign in as an admin
+any more, make an empty file named `reset-admin` in the data folder and restart the container:
+
+```sh
+touch data/reset-admin
+docker compose restart
+```
+
+On Windows PowerShell the first line is `New-Item data\reset-admin`. On Linux it may need `sudo` when the data
+folder belongs to root. At start the server deletes the file, removes the password of the built-in `admin`
+account and signs that account out on every device. Everything else stays: the other accounts, and the admin's
+own shelf, places, bookmarks and highlights.
+
+The web client then shows the setup page again, asking for a new password for `admin`. Because other people
+may already be using the server, it asks for the setup key from every address, the server's own network
+included. The key is in `data/token`, which the server writes again at that start, or the value of
+`UNISON_TOKEN` if you set that variable. Choosing the password ends the key and deletes that file, as after the
+first setup. People with other accounts stay signed in, and the page has a "Sign in with another account" link
+for them.
+
+The reset is written to the audit log. The file is acted on once: to reset again, make it again, and make it
+again if the server restarts before the new password is chosen. Only someone who can write to the data folder
+can do this, and that person could already replace the database. If another admin can still sign in, they can
+instead give `admin` a new password on the Admin page.
 
 ### Reaching it from outside the house
 
@@ -289,7 +330,7 @@ on the web client's Account page (`GET /api/users/audit`). Not yet: a second fac
 | `GET/PUT /api/works/{id}/position` | reading passage and audio position, kept per user and device; GET answers the newest from any device with `by` (that device's name); PUT with `?base=` (the server time of the place the client last had) answers 409 with the newer place when another device moved the book after it |
 | `GET /api/works/{id}/speed`, `PUT /api/works/{id}/speed` (speed) | my listening speed for the book, 0.5 to 3; GET gives 1 with `updated` 0 when never set; also in the work detail as `speed` |
 | `POST /api/login` | name + password + device → token and user; `web: true` also sets the browser cookie; throttled |
-| `GET /api/setup`, `POST /api/setup` (password, key, device, web) | the first run, no token needed. GET answers `needed` (true while no account has a password), `key` (true when this caller must also send the setup key), `minPassword`, and `library`: what the scan has found so far (`ebooks`, `audiobooks`, `paired`, `scanned` once a pass has ended, `calibre` when the ebook folder has a `metadata.db`, `ebookFolderEmpty`, `audiobookFolderEmpty`). POST gives the built-in `admin` its password and answers as a sign-in does (token and user, and the cookie with `web: true`). 403 without the right key from an address that is not private, 400 for a password under eight characters, 429 after five wrong keys from one address, and 409 once any account has a password, after which GET answers only `needed: false` |
+| `GET /api/setup`, `POST /api/setup` (password, key, device, web) | the first run, no token needed. GET answers `needed` (true while no account has a password), `key` (true when this caller must also send the setup key), `reset` (true after the admin password was reset, until a new one is chosen; `needed` is then true too), `minPassword`, and `library`: what the scan has found so far (`ebooks`, `audiobooks`, `paired`, `scanned` once a pass has ended, `calibre` when the ebook folder has a `metadata.db`, `ebookFolderEmpty`, `audiobookFolderEmpty`). POST gives the built-in `admin` its password and answers as a sign-in does (token and user, and the cookie with `web: true`). 403 without the right key from an address that is not private, 400 for a password under eight characters, 429 after five wrong keys from one address, and 409 once any account has a password, after which GET answers only `needed: false` |
 | `POST /api/link/start` (device), `POST /api/link/claim` (secret) | Wear OS sign-in, the watch's side, no token needed. `start` answers a six-digit `code` to show, a `secret` to ask with, when the code `expires` and how often to ask (`poll`, seconds); 429 when five codes already wait from that address, or a hundred in all. `claim` answers `{status: "waiting"}` until a signed-in person approves the code, then once `{status: "approved", token, user}`; 410 when the code has ended, been used, or never was |
 | `GET /api/me/link/{code}`, `POST /api/me/link/{code}` | Wear OS sign-in, the signed-in side: which device shows this code (`device`, `address`, `created`), and yes, sign it in as me. 404 for a code nobody is waiting behind; five wrong codes in a row and the person waits, as with wrong passwords (429) |
 | `POST /api/me/cookie` | sets the browser cookie for a token a browser already holds |

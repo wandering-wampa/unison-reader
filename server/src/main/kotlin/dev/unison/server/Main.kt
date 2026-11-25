@@ -53,6 +53,8 @@ fun main() {
     log.info("UnisonServer ${Version.NAME}: audiobooks=${config.audiobooks} ebooks=${config.ebooks} data=${config.data} workers=${config.workers} port=${config.port}")
     val catalog = Catalog(File(config.data, "catalog.db"))
     val users = Users(catalog.connection, config.token)
+    // A file named reset-admin in the data folder, once, for a forgotten admin password (see Setup.resetAdmin).
+    Setup.resetAdmin(config, users)
     // A server set up after the first key was ended has no use for the file that start-up has just made again.
     Setup.dropKeyFile(config, users)
     val stats = Stats(catalog.connection)

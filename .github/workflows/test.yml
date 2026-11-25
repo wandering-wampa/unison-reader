@@ -1,0 +1,48 @@
+# Builds the server and runs its tests on every push to main and every pull request; only in the public repository.
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    if: github.repository == 'wandering-wampa/unison-reader'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      # The reader's foliate-js at the commit the Dockerfile pins; the server build packs it into its web resources.
+      - name: Fetch foliate-js
+        env:
+          FOLIATE_COMMIT: 78914aef4466eb960965702401634c2cb348e9b1
+        run: |
+          git init vendor/foliate-js
+          git -C vendor/foliate-js remote add origin https://github.com/johnfactotum/foliate-js.git
+          git -C vendor/foliate-js fetch --depth 1 origin "$FOLIATE_COMMIT"
+          git -C vendor/foliate-js checkout --detach FETCH_HEAD
+          test "$(git -C vendor/foliate-js rev-parse HEAD)" = "$FOLIATE_COMMIT"
+
+      # --configure-on-demand keeps Gradle from configuring the app and wear projects, so no Android SDK is needed.
+      # Run through sh: the wrapper in the public copy has no executable bit.
+      - name: Build and test the server
+        run: sh ./gradlew --configure-on-demand --no-daemon --console=plain :server:installDist :server:test
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-report
+          path: server/build/reports/tests/

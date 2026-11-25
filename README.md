@@ -1,5 +1,7 @@
 # UnisonReader
 
+[![Tests](https://github.com/wandering-wampa/unison-reader/actions/workflows/test.yml/badge.svg)](https://github.com/wandering-wampa/unison-reader/actions/workflows/test.yml)
+
 An Android app, a server and a web client for reading an ebook and listening to its audiobook as the same book. The server works out when each sentence of the ebook is spoken in the audiobook. Once it has, the reader highlights the sentence being narrated and keeps the page with it, and you can stop listening and read on from that sentence.
 
 I built it for my own household's library and it's shared as it is. The [Status](#status) section lists what's missing for anyone else.
@@ -63,10 +65,18 @@ It's in daily use here. For anyone else it's early. Before you spend an evening 
 
 ## Running the server
 
-1. Make an empty folder and put two files from `server/deploy/` in this repository into it: `compose.yaml`, and `.env.example` saved as `.env`.
-2. In `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two folders.
-3. In that folder, run `docker compose up -d`. The first run pulls the image.
-4. Open `http://<host>:8095` in a browser. A new server has no password: the page shows what it found in the two folders and asks you to choose the admin password. If you open it from outside your own network it also asks for a key that's in a file on the server, so a stranger can't get there first. The key stops working once the setup is done.
+1. Make an empty folder, open a terminal in it and download the two files (in Windows PowerShell, type `curl.exe` in place of `curl`):
+
+   ```sh
+   curl -fsSLO https://raw.githubusercontent.com/wandering-wampa/unison-reader/main/server/deploy/compose.yaml
+   curl -fsSL https://raw.githubusercontent.com/wandering-wampa/unison-reader/main/server/deploy/.env.example -o .env
+   ```
+
+2. In `.env`, set `UNISON_AUDIOBOOKS` and `UNISON_EBOOKS` to your two folders. On Windows write them with forward slashes, such as `C:/Books/audiobooks`.
+3. In that folder, run `docker compose up -d`. The first run pulls the image, about 340 MB.
+4. Open `http://<host>:8095` in a browser. A new server has no password: the page shows what it found in the two folders and asks you to choose the admin password. If you open it from outside your own network it also asks for a key, which is the contents of `data/token` beside `compose.yaml`, so a stranger can't get there first. The key stops working once the setup is done.
+
+This needs the Compose plugin (the command is `docker compose`, not `docker-compose`). On Linux, `docker` may need `sudo` or membership of the `docker` group. If port 8095 is taken, set `UNISON_PORT` in `.env`. Other machines can reach the server only if the host's firewall lets that port through. The first scan keeps adding books for a while after the page opens, so the library fills in over the next minutes.
 
 To build the image yourself instead, run `docker build -t unisonserver:local .` in a clone of this repository and set `UNISON_IMAGE=unisonserver:local` in `.env`.
 
@@ -82,6 +92,7 @@ The APKs are on the [Releases page](https://github.com/wandering-wampa/unison-re
 - [Building the apps and the server](docs/BUILD.md)
 - [How the alignment works](docs/ALIGNMENT.md)
 - [Testing](docs/TESTING.md)
+- [Changelog](CHANGELOG.md)
 - [Third-party licences](docs/THIRD_PARTY.md)
 
 ## Licence

@@ -150,7 +150,7 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     fun local(call: ApplicationCall) = Setup.local(call.request.origin.remoteAddress, Setup.forwarded { call.request.headers.getAll(it).orEmpty() })
                     get {
                         if (!users.setupNeeded()) return@get call.respond(SetupStatus(needed = false))
-                        call.respond(SetupStatus(needed = true, key = !local(call), library = Setup.library(config, catalog.works(), scanner.scanned)))
+                        call.respond(SetupStatus(needed = true, key = users.resetPending() || !local(call), reset = users.resetPending(), library = Setup.library(config, catalog.works(), scanner.scanned)))
                     }
                     post {
                         val req = call.receive<SetupRequest>()
@@ -162,10 +162,12 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                             call.response.header(HttpHeaders.RetryAfter, wait.toString())
                             return@post call.respond(HttpStatusCode.TooManyRequests, Message("Too many attempts. Try again in ${if (wait >= 120) "${(wait + 59) / 60} minutes" else "$wait seconds"}."))
                         }
-                        if (!local(call) && !Setup.keyMatches(req.key, config.token)) {
+                        // After a reset of the admin password the key is needed from every address: other accounts may exist, and behind Docker every caller looks private.
+                        val reset = users.resetPending()
+                        if ((reset || !local(call)) && !Setup.keyMatches(req.key, config.token)) {
                             users.throttle.fail(key)
                             users.audit("admin", "setup refused", address, if (req.key.isBlank()) "no setup key" else "wrong setup key")
-                            return@post call.respond(HttpStatusCode.Forbidden, Message(if (req.key.isBlank()) "From this address the setup key is needed too." else "That is not this server's setup key."))
+                            return@post call.respond(HttpStatusCode.Forbidden, Message(if (req.key.isBlank()) (if (reset) "The admin password was reset on the server, so the setup key is needed: the contents of the file named token in its data folder." else "From this address the setup key is needed too.") else "That is not this server's setup key."))
                         }
                         if (!users.setUp(req.password)) return@post call.respond(HttpStatusCode.Conflict, done)
                         users.throttle.clear(key)
