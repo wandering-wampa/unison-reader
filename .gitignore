@@ -19,3 +19,5 @@ app/src/main/assets/models/*.onnx
 **/.cxx/
 __pycache__/
 *.pyc
+# A release APK downloaded or copied to the top of the checkout
+/UnisonReader-*.apk
