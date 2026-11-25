@@ -27,7 +27,8 @@ FROM --platform=$BUILDPLATFORM eclipse-temurin:21-jdk-jammy AS build
 WORKDIR /src
 COPY . .
 COPY --from=fetch /fetch/foliate-js vendor/foliate-js
-RUN ./gradlew --configure-on-demand --no-daemon --console=plain :server:installDist
+# Run through sh: a checkout made on Windows does not carry the wrapper's executable bit.
+RUN sh ./gradlew --configure-on-demand --no-daemon --console=plain :server:installDist
 
 FROM eclipse-temurin:21-jre-jammy
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
