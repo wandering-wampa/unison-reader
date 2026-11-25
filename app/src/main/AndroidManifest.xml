@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application android:name=".ReaderApplication" android:label="@string/app_name" android:icon="@mipmap/ic_unison" android:roundIcon="@mipmap/ic_unison_round" android:theme="@style/Theme.Reader" android:allowBackup="false" android:usesCleartextTraffic="true" android:dataExtractionRules="@xml/backup_rules" android:supportsRtl="true">
+        <activity android:name=".MainActivity" android:exported="true" android:label="@string/launcher_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- unisonreader://connect?url=…&token=… connects the app to a UnisonServer. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="unisonreader" android:host="connect" />
+            </intent-filter>
+            <!-- "Play <book> on Unison" asked of the assistant: the audiobook starts and the app opens on it. -->
+            <intent-filter>
+                <action android:name="android.media.action.MEDIA_PLAY_FROM_SEARCH" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <service android:name=".PlaybackService" android:exported="true" android:foregroundServiceType="mediaPlayback"><intent-filter><action android:name="androidx.media3.session.MediaLibraryService" /><action android:name="androidx.media3.session.MediaSessionService" /><action android:name="android.media.browse.MediaBrowserService" /></intent-filter></service>
+        <!-- Android Auto: this app offers media (the playback service's library). -->
+        <meta-data android:name="com.google.android.gms.car.application" android:resource="@xml/automotive_app_desc" />
+        <service android:name=".PreparationService" android:exported="false" android:foregroundServiceType="mediaProcessing" />
+        <service android:name=".ImportService" android:exported="false" android:foregroundServiceType="dataSync" />
+        <receiver android:name="androidx.media3.session.MediaButtonReceiver" android:exported="true"><intent-filter><action android:name="android.intent.action.MEDIA_BUTTON" /></intent-filter></receiver>
+    </application>
+</manifest>

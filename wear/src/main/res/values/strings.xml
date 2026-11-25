@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Unison</string>
+    <string name="playback_channel">Playback</string>
+    <string name="download_channel">Downloads</string>
+</resources>

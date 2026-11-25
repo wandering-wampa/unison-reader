@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">UnisonReader</string>
+    <!-- The home-screen label: short enough that no launcher shortens it. -->
+    <string name="launcher_name">Unison</string>
+    <string name="playback_channel">Playback</string>
+</resources>

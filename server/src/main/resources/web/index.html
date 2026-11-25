@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Unison</title>
+<meta name="description" content="Your ebooks and audiobooks, in unison.">
+<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+<link rel="manifest" href="/site.webmanifest">
+<meta name="theme-color" content="#064D73">
+<meta property="og:title" content="Unison">
+<meta property="og:description" content="Ebooks &amp; audiobooks">
+<meta property="og:image" content="/brand/open-graph.png">
+<script src="/theme.js?v=12"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400&family=Inter:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="/app.css?v=20">
+</head>
+<body>
+<header id="top" hidden>
+  <a class="brand" href="#/shelf" aria-label="Unison shelf"><i class="mark"></i><span>Unison</span></a>
+  <nav id="nav" aria-label="Library">
+    <a href="#/shelf" data-tab="shelf">Shelf</a>
+    <a href="#/books" data-tab="books">Books</a>
+    <a href="#/series" data-tab="series">Series</a>
+    <a href="#/authors" data-tab="authors">Authors</a>
+    <a href="#/narrators" data-tab="narrators">Narrators</a>
+    <a href="#/lists" data-tab="lists">Lists</a>
+    <a href="#/highlights" data-tab="highlights">Highlights</a>
+    <a href="#/stats" data-tab="stats">Stats</a>
+    <a href="#/admin" data-tab="admin" id="adminTab" hidden>Admin</a>
+  </nav>
+  <form id="searchForm" role="search"><input id="search" type="search" placeholder="Search titles, authors, series, narrators" aria-label="Search the library"></form>
+  <a id="now" class="now" href="#" hidden title="Open the player"><i></i><b></b><span></span></a>
+  <button id="theme" class="ghost icon" type="button" title="Light or dark" aria-label="Light or dark"></button>
+  <a id="who" class="ghost" href="#/account" title="Account"><i></i><span></span></a>
+</header>
+<main id="view" aria-live="polite"></main>
+<audio id="audio" preload="metadata"></audio>
+<div id="toast" hidden></div>
+<script src="/app.js?v=23"></script>
+</body>
+</html>

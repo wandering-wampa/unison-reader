@@ -1,0 +1,30 @@
+<resources>
+    <!-- The Night room: blue-black paper, cream text, teal actions with the brand's ink on them. -->
+    <style name="Theme.Reader" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="colorPrimary">#00B7BC</item>
+        <item name="colorOnPrimary">#062F47</item>
+        <item name="colorPrimaryContainer">#125657</item>
+        <item name="colorOnPrimaryContainer">#DFF6F6</item>
+        <item name="colorSecondary">#5FD3D6</item>
+        <item name="colorOnSecondary">#062F47</item>
+        <item name="colorSecondaryContainer">#173B4D</item>
+        <item name="colorOnSecondaryContainer">#F3EEDF</item>
+        <item name="colorTertiary">#E0A83A</item>
+        <item name="colorError">#F0A090</item>
+        <item name="colorSurface">#0B2231</item>
+        <item name="colorOnSurface">#F3EEDF</item>
+        <item name="colorSurfaceContainerLowest">#071A26</item>
+        <item name="colorSurfaceContainerLow">#0D2838</item>
+        <item name="colorSurfaceContainer">#0F2D40</item>
+        <item name="colorSurfaceContainerHigh">#133447</item>
+        <item name="colorSurfaceContainerHighest">#173B4D</item>
+        <item name="colorSurfaceVariant">#173B4D</item>
+        <item name="colorOnSurfaceVariant">#A6B4BE</item>
+        <item name="colorOutline">#6E8391</item>
+        <item name="colorOutlineVariant">#1E4056</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowBackground">#0B2231</item>
+    </style>
+</resources>

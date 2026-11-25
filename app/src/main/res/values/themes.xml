@@ -1,0 +1,31 @@
+<resources>
+    <!-- The Reading Room: cream paper, brand ink, one deep-blue action colour. Dialogs, sheets and
+         Material buttons that are not styled by BookishUi take their colours from here. -->
+    <style name="Theme.Reader" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:fontFamily">sans-serif</item>
+        <item name="colorPrimary">#064D73</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#D6E6EF</item>
+        <item name="colorOnPrimaryContainer">#062F47</item>
+        <item name="colorSecondary">#0B5F62</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="colorSecondaryContainer">#B3E3E0</item>
+        <item name="colorOnSecondaryContainer">#062F47</item>
+        <item name="colorTertiary">#8A5A00</item>
+        <item name="colorError">#B4412B</item>
+        <item name="colorSurface">#FBF6EA</item>
+        <item name="colorOnSurface">#1E2B33</item>
+        <item name="colorSurfaceContainerLowest">#FFFFFF</item>
+        <item name="colorSurfaceContainerLow">#F7F1E3</item>
+        <item name="colorSurfaceContainer">#F3EDDE</item>
+        <item name="colorSurfaceContainerHigh">#EEE7D6</item>
+        <item name="colorSurfaceContainerHighest">#EAE2CF</item>
+        <item name="colorSurfaceVariant">#EAE2CF</item>
+        <item name="colorOnSurfaceVariant">#5F6E78</item>
+        <item name="colorOutline">#8A9AA3</item>
+        <item name="colorOutlineVariant">#E6DECB</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowBackground">#FBF6EA</item>
+    </style>
+</resources>
