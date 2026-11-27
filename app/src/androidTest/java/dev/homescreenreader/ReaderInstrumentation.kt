@@ -45,6 +45,7 @@ class ReaderInstrumentation : Instrumentation() {
                 "shelves" -> stageShelves()
                 "server" -> server()
                 "auto" -> auto()
+                "placeplay" -> placePlay()
                 else -> error("Unknown mode")
             }
             result.putString("stream", "PASS: $mode\n")
@@ -190,6 +191,77 @@ class ReaderInstrumentation : Instrumentation() {
      * What Android Auto does, with the platform's own media browser: connect to the playback service, read the
      * tabs and their lists, play a book by its id and by a spoken search, and pause. The active book must have audio.
      */
+    /**
+     * Play on a loaded, paused server book asks the server first when the book has not played here lately. Uses the app's
+     * own sign-in (nothing is typed or passed in) and a streamed server book already on the shelf; stages another device's
+     * newer place with the same client. Both the app's "toggle" and a media-session play (headphones, lock screen) are tried.
+     */
+    private fun placePlay() {
+        val c = targetContext
+        val s = ReadingState(c)
+        val client = Server.client(s) ?: error("This install is not signed in to a server: nothing to stage")
+        val (b, anchors) = Library(c).use { db -> db.books().sortedByDescending { it.id == "srv-4c94c45017d1f1ad" }.firstNotNullOfOrNull { x -> if (!x.id.startsWith("srv-")) null else db.load(x.id)?.takeIf { it.tracks.isNotEmpty() }?.let { it to db.anchors(it.id) } } } ?: error("No streamed server book on this install")
+        val work = s.serverWork(b.id) ?: error("Not a server book")
+        val a1 = anchors.first { it.start > 120_000 }
+        val a2 = anchors.first { it.start > a1.start + 300_000 }
+        val previousActive = s.active
+        fun waitFor(what: String, seconds: Int = 20, test: () -> Boolean) { val end = SystemClock.elapsedRealtime() + seconds * 1000; while (SystemClock.elapsedRealtime() < end) { if (test()) return; Thread.sleep(250) }; error(what) }
+        fun live(): Long { var p = 0L; runOnMainSync { p = PlaybackService.livePosition() }; return p }
+        // This device at a1 and agreed with the server, the book loaded and paused; then another device moves it to a2.
+        fun stage() {
+            s.active = b.id
+            s.position(b.id, a1.passage, a1.start)
+            PlaybackService.freshMs = 120_000
+            runOnMainSync { PlaybackService.send(c, "play", b.id, a1.start) }
+            waitFor("The book did not start") { PlaybackService.playing() && PlaybackService.playingBook() == b.id }
+            runOnMainSync { PlaybackService.send(c, "pause", b.id) }
+            waitFor("The book did not pause") { !PlaybackService.playing() }
+            // Agreed with the server at the place the pause left (a little past a1): nothing has moved here since.
+            Thread.sleep(500)
+            val passage = s.passage(b.id); val audio = s.audio(b.id)
+            val here = client.putPosition(work, passage, audio)
+            s.markPushed(b.id, passage, audio, here.updated)
+            Thread.sleep(100)
+            client.putPosition(work, a2.passage, a2.start)
+        }
+        fun pause() { runOnMainSync { PlaybackService.send(c, "pause", b.id) }; waitFor("The book did not pause") { !PlaybackService.playing() } }
+        fun playedAt(): Long { waitFor("The book did not start", 15) { PlaybackService.playing() }; Thread.sleep(1500); return live() }
+        // Within the threshold: starts where it was, the other device's place is left for the person to be asked.
+        stage()
+        runOnMainSync { PlaybackService.send(c, "toggle", b.id) }
+        var at = playedAt()
+        check(at in a1.start..a1.start + 20_000) { "Within two minutes it must start where it was (${a1.start}), started at $at" }
+        pause()
+        // Stale (threshold 0): the newer place is taken, by the app's own Play ...
+        stage()
+        PlaybackService.freshMs = 0
+        runOnMainSync { PlaybackService.send(c, "toggle", b.id) }
+        at = playedAt()
+        check(at in a2.start..a2.start + 20_000) { "Toggle after a long pause must start at the other device's place (${a2.start}), started at $at" }
+        pause()
+        // ... and by a media-session play, as from headphones or the lock screen.
+        stage()
+        PlaybackService.freshMs = 0
+        var browser: android.media.browse.MediaBrowser? = null
+        val connected = java.util.concurrent.CountDownLatch(1)
+        runOnMainSync {
+            browser = android.media.browse.MediaBrowser(c, android.content.ComponentName(c, PlaybackService::class.java), object : android.media.browse.MediaBrowser.ConnectionCallback() {
+                override fun onConnected() { connected.countDown() }
+            }, null)
+            browser!!.connect()
+        }
+        check(connected.await(15, java.util.concurrent.TimeUnit.SECONDS)) { "No media browser connection" }
+        val controller = android.media.session.MediaController(c, browser!!.sessionToken)
+        runOnMainSync { controller.transportControls.play() }
+        at = playedAt()
+        check(at in a2.start..a2.start + 20_000) { "A session play after a long pause must start at the other device's place (${a2.start}), started at $at" }
+        pause()
+        runOnMainSync { browser!!.disconnect() }
+        PlaybackService.freshMs = 120_000
+        s.active = previousActive
+        report("Play on a paused server book: within the threshold it started at ${a1.start}; after it the toggle and a session play both started at the other device's place ${a2.start}")
+    }
+
     private fun auto() {
         val c = targetContext
         val db = Library(c)

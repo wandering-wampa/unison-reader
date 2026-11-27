@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "UnisonReader"
-include(":app", ":wear", ":core", ":server")
+include(":app", ":core", ":server")

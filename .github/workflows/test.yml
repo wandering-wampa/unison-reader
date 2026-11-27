@@ -1,5 +1,5 @@
 # On every push to main and every pull request, in the public repository only: builds the server and runs its tests,
-# and builds the phone and watch apps (debug) on Linux from a clean clone, as docs/BUILD.md describes.
+# and builds the phone app (debug) on Linux from a clean clone, as docs/BUILD.md describes.
 name: Tests
 
 on:
@@ -37,7 +37,7 @@ jobs:
           git -C vendor/foliate-js checkout --detach FETCH_HEAD
           test "$(git -C vendor/foliate-js rev-parse HEAD)" = "$FOLIATE_COMMIT"
 
-      # --configure-on-demand keeps Gradle from configuring the app and wear projects, so no Android SDK is needed.
+      # --configure-on-demand keeps Gradle from configuring the app project, so no Android SDK is needed.
       # Run through sh: the wrapper in the public copy has no executable bit.
       - name: Build and test the server
         run: sh ./gradlew --configure-on-demand --no-daemon --console=plain :server:installDist :server:test
@@ -68,5 +68,5 @@ jobs:
         run: sh ./bootstrap.sh --install-native-tools
 
       # -PpublicBuild leaves out any server address of the builder, as for an APK handed to other people.
-      - name: Build the phone and watch apps
-        run: sh ./gradlew :app:assembleDebug :wear:assembleDebug -PpublicBuild --no-daemon --console=plain
+      - name: Build the phone app
+        run: sh ./gradlew :app:assembleDebug -PpublicBuild --no-daemon --console=plain

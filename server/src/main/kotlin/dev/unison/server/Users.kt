@@ -100,10 +100,17 @@ class Users(private val db: Connection, private val legacyToken: String) {
         return byName(name)!!
     }
 
-    fun setPassword(id: Long, password: String) {
+    /**
+     * Changes a password and signs the person's devices out: every token of theirs is revoked, except the one in
+     * `keepToken` (the session of a person changing their own password, which stays signed in). Returns how many were revoked.
+     */
+    fun setPassword(id: Long, password: String, keepToken: String? = null): Int {
         require(password.length >= MIN_PASSWORD) { "A password is at least $MIN_PASSWORD characters" }
         val salt = salt()
-        exec("UPDATE users SET hash = ?, salt = ? WHERE id = ?", hash(password, salt), salt, id)
+        return synchronized(db) {
+            exec("UPDATE users SET hash = ?, salt = ? WHERE id = ?", hash(password, salt), salt, id)
+            if (keepToken == null) revokeAll(id) else exec("DELETE FROM tokens WHERE user = ? AND token != ?", id, sha256(keepToken))
+        }
     }
 
     fun delete(id: Long) { require(id != 1L) { "The built-in admin stays" }; exec("DELETE FROM users WHERE id = ?", id) }
@@ -183,7 +190,7 @@ class Users(private val db: Connection, private val legacyToken: String) {
         return byId(row.first)!! to issue(row.first, device)
     }
 
-    /** A new device token for this person: after a correct password, or when they approved a device's sign-in code (`DeviceLinks`). */
+    /** A new device token for this person: after a correct password. */
     fun issue(user: Long, device: String): String {
         val token = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
         exec("INSERT INTO tokens (token, prefix, hashed, user, device, created, last_seen) VALUES (?, ?, 1, ?, ?, ?, ?)", sha256(token), token.take(8), user, device.take(60), System.currentTimeMillis(), System.currentTimeMillis())

@@ -45,12 +45,14 @@ class SyncService(private val config: Config, private val catalog: Catalog, priv
 
     @Serializable class Live(val work: String, val title: String, val unitsDone: Int, val units: Int, val current: List<String>, val startedAt: Long)
 
-    private class Job(val work: Work, val book: Book, val text: BookText, val total: Int, val startedAt: Long) {
+    internal class Job(val work: Work, val book: Book, val text: BookText, val total: Int, val startedAt: Long) {
         val cancel = AtomicBoolean(false)
         val remaining = AtomicInteger(0)
         val done = AtomicInteger(0)
         val current = ConcurrentHashMap.newKeySet<String>()
         val failed = AtomicBoolean(false)
+        /** Set by [restart] while the job runs: the last worker to finish wipes the alignment and starts the work again. */
+        @Volatile var restartAfter = false
     }
 
     private val jobs = ConcurrentHashMap<String, Job>()
@@ -111,14 +113,29 @@ class SyncService(private val config: Config, private val catalog: Catalog, priv
         return true
     }
 
-    fun cancel(id: String) { jobs[id]?.cancel?.set(true) }
+    /** Pauses a running job after its current chapters; a restart still waiting for them is dropped, so the pause wins. */
+    @Synchronized
+    fun cancel(id: String) { jobs[id]?.let { it.restartAfter = false; it.cancel.set(true) } }
 
-    /** Drops a work's alignment and starts over (after an ebook change, say). */
-    fun restart(id: String) { cancel(id); catalog.resetSync(id); request(id) }
+    /**
+     * Drops a work's alignment and starts over (after an ebook change, say). While the work is syncing, the workers are
+     * told to stop and the job is marked: [finish] does the wipe and the new start once the last one is done, so nothing
+     * a draining worker writes survives the wipe. Otherwise it wipes and starts at once.
+     */
+    @Synchronized
+    fun restart(id: String) {
+        val job = jobs[id]
+        if (job != null) { job.restartAfter = true; job.cancel.set(true); return }
+        catalog.resetSync(id)
+        request(id)
+    }
+
+    /** Registers a job without planning or submitting anything: for tests of the cancel and restart rules. */
+    internal fun adopt(job: Job) { synchronized(this) { jobs[job.work.id] = job } }
 
     private fun runUnit(job: Job, unit: SyncPlan.SyncUnit) {
         val id = job.work.id
-        if (job.cancel.get() || job.failed.get()) { finish(job); return }
+        if (job.cancel.get() || job.failed.get() || catalog.missingSince(id) != null) { finish(job); return }
         job.current += unit.title
         val started = System.currentTimeMillis()
         try {
@@ -140,10 +157,22 @@ class SyncService(private val config: Config, private val catalog: Catalog, priv
         }
     }
 
-    private fun finish(job: Job) {
+    internal fun finish(job: Job) {
         if (job.remaining.decrementAndGet() > 0) return
         val id = job.work.id
-        jobs.remove(id)
+        // Removing the job and reading the flag happen together, so a restart sees either a running job or none.
+        // The wipe and the new start stay inside the same lock: restart and cancel see the old job or the new one, never the gap.
+        // The lock is re-entrant for request; the pool's queue is unbounded, so submitting never waits.
+        val again = synchronized(this) {
+            jobs.remove(id)
+            if (job.restartAfter) {
+                log.info("${job.work.title}: starting over")
+                catalog.resetSync(id)
+                if (!request(id)) log.info("${job.work.title}: cannot start over, the book is not ready")
+                true
+            } else false
+        }
+        if (again) return
         val units = catalog.units(id)
         val status = when {
             job.failed.get() -> catalog.work(id)?.status ?: "Failed"

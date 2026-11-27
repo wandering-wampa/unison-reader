@@ -78,21 +78,50 @@ class BookishUi(val context: Context) {
             layoutParams = LinearLayout.LayoutParams(dp(48), dp(48))
             setOnClickListener { action() }
         }
-    fun cover(book: Book, width: Int, height: Int): View {
-        val frame = FrameLayout(context).apply {
-            background = shape(surface, 5); clipToOutline = true
-            layoutParams = LinearLayout.LayoutParams(dp(width), dp(height))
-            contentDescription = "Cover of ${book.title}"
-        }
-        val image = ImageView(context).apply {
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            if (book.cover.isNotBlank()) coverBitmap(book.cover, dp(width))?.let { setImageBitmap(it) }
-        }
-        if (image.drawable != null) frame.addView(image, FrameLayout.LayoutParams(-1, -1))
-        else frame.addView(text(book.title, 18f, true).apply {
-            gravity = Gravity.CENTER; setPadding(dp(12), dp(16), dp(12), dp(16))
-        }, FrameLayout.LayoutParams(-1, -1))
-        return frame
+    /**
+     * A book's cover in a slot of the given size (the slot never changes size, so no row or layout moves). A loaded image
+     * gives the rounded, shadowed card its own shape, between square and 2:3 (width:height) at the slot's width; [gravity]
+     * says where the card sits in the slot. No image, or a portrait cover, fills the slot as it always did. A shadow set
+     * with `elevation` lands on the card.
+     */
+    fun cover(book: Book, width: Int, height: Int, gravity: Int = Gravity.CENTER, fitHeight: Boolean = false): CoverSlot {
+        val slot = CoverSlot(this, width, height, gravity, fitHeight).apply { contentDescription = "Cover of ${book.title}" }
+        val bitmap = if (book.cover.isNotBlank()) coverBitmap(book.cover, dp(width)) else null
+        if (bitmap != null) slot.showBitmap(bitmap)
+        else slot.showPlaceholder(text(book.title, 18f, true).apply { this.gravity = Gravity.CENTER; setPadding(dp(12), dp(16), dp(12), dp(16)) })
+        return slot
+    }
+}
+
+/**
+ * The slot a cover is drawn in: a transparent frame of fixed size holding the card (rounded corners, surface colour, the
+ * shadow). The card is the whole slot until an image is shown; then it takes the image's shape, so no band of the card's
+ * colour shows above or below a square cover. An image can arrive after the view is built: show it with [showFile] or [showBitmap].
+ */
+class CoverSlot(private val ui: BookishUi, widthDp: Int, heightDp: Int, private val place: Int, fitHeight: Boolean = false) : FrameLayout(ui.context) {
+    private val slotWidth = ui.dp(widthDp); private val slotHeight = ui.dp(heightDp)
+    private val card = FrameLayout(ui.context).apply { background = ui.shape(ui.surface, 5); clipToOutline = true }
+    init {
+        clipChildren = false; clipToPadding = false
+        // With `fitHeight` (the Home hero, alone) the slot is as tall as its card; every list row keeps a fixed slot so rows stay aligned.
+        layoutParams = LinearLayout.LayoutParams(slotWidth, if (fitHeight) -2 else slotHeight)
+        addView(card, LayoutParams(slotWidth, slotHeight, place))
+    }
+    override fun setElevation(elevation: Float) { card.elevation = elevation }
+    override fun getElevation() = card.elevation
+    private fun cardHeight(height: Int) { (card.layoutParams as LayoutParams).height = height; card.requestLayout() }
+    fun showPlaceholder(label: View) { card.removeAllViews(); cardHeight(slotHeight); card.addView(label, LayoutParams(-1, -1)) }
+    fun showBitmap(bitmap: Bitmap) = show(ImageView(context).apply { setImageBitmap(bitmap) }, bitmap.width, bitmap.height)
+    /** An image file; a file that cannot be read leaves what was shown. */
+    fun showFile(file: java.io.File) {
+        // Downsampled and cached like every other cover, never a full-size decode on the main thread.
+        showBitmap(coverBitmap(file.path, slotWidth) ?: return)
+    }
+    private fun show(image: ImageView, imageWidth: Int, imageHeight: Int) {
+        image.scaleType = ImageView.ScaleType.FIT_CENTER
+        val shape = (imageWidth.toFloat() / imageHeight.coerceAtLeast(1)).coerceIn(2f / 3f, 1f)
+        card.removeAllViews(); card.addView(image, LayoutParams(-1, -1))
+        cardHeight(minOf(slotHeight, (slotWidth / shape).toInt()))
     }
 }
 
@@ -117,7 +146,7 @@ class BookishIcon(private val name: String, private val tint: Int) : Drawable() 
             "pause" -> "M8 5 V19 M16 5 V19"
             "contents" -> "M8 6 H21 M8 12 H21 M8 18 H21 M3 6 H3.1 M3 12 H3.1 M3 18 H3.1"
             "more" -> "M5 12 H5.1 M12 12 H12.1 M19 12 H19.1"
-            "settings" -> "M4 6 H20 M4 12 H20 M4 18 H20 M8 3 V9 M16 9 V15 M10 15 V21"
+            "settings" -> "M10.34 4.79 L10.33 2.55 L13.67 2.55 L13.66 4.79 A7.4 7.4 0 0 1 15.92 5.72 L17.51 4.14 L19.86 6.49 L18.28 8.08 A7.4 7.4 0 0 1 19.21 10.34 L21.45 10.33 L21.45 13.67 L19.21 13.66 A7.4 7.4 0 0 1 18.28 15.92 L19.86 17.51 L17.51 19.86 L15.92 18.28 A7.4 7.4 0 0 1 13.66 19.21 L13.67 21.45 L10.33 21.45 L10.34 19.21 A7.4 7.4 0 0 1 8.08 18.28 L6.49 19.86 L4.14 17.51 L5.72 15.92 A7.4 7.4 0 0 1 4.79 13.66 L2.55 13.67 L2.55 10.33 L4.79 10.34 A7.4 7.4 0 0 1 5.72 8.08 L4.14 6.49 L6.49 4.14 L8.08 5.72 A7.4 7.4 0 0 1 10.34 4.79 Z M15 12 A3 3 0 1 1 9 12 A3 3 0 1 1 15 12"
             "chevron" -> "M9 5 L16 12 L9 19"
             "down" -> "M5 9 L12 16 L19 9"
             "home" -> "M4 11 L12 4 L20 11 V20 H14 V14 H10 V20 H4 Z"
@@ -129,7 +158,6 @@ class BookishIcon(private val name: String, private val tint: Int) : Drawable() 
             "phone" -> "M7 3 H17 A1 1 0 0 1 18 4 V20 A1 1 0 0 1 17 21 H7 A1 1 0 0 1 6 20 V4 A1 1 0 0 1 7 3 M11 18 H13"
             "folder" -> "M3 6 A1 1 0 0 1 4 5 H9 L11 7 H20 A1 1 0 0 1 21 8 V18 A1 1 0 0 1 20 19 H4 A1 1 0 0 1 3 18 Z"
             "devices" -> "M3 5 H15 V14 H3 Z M1 17 H16 M18 9 H22 V19 H18 Z"
-            "watch" -> "M8.5 7 H15.5 A2.5 2.5 0 0 1 18 9.5 V14.5 A2.5 2.5 0 0 1 15.5 17 H8.5 A2.5 2.5 0 0 1 6 14.5 V9.5 A2.5 2.5 0 0 1 8.5 7 M9 7 L10 3 H14 L15 7 M9 17 L10 21 H14 L15 17 M12 10 V12.5 H14"
             "people" ->"M9 11 A3 3 0 1 0 9 5 A3 3 0 1 0 9 11 M3 19 C3 14 15 14 15 19 M16 5 A3 3 0 0 1 16 11 M18 14 C20 15 21 16.5 21 19"
             "lock" -> "M6 11 H18 V20 H6 Z M8 11 V8 A4 4 0 0 1 16 8 V11"
             "swap" -> "M4 8 H18 M14 4 L18 8 L14 12 M20 16 H6 M10 12 L6 16 L10 20"

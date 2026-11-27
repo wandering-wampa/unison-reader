@@ -40,7 +40,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.slf4j.event.Level
 
-@Serializable class Health(val version: String, val works: Int, val ready: Int, val preparing: Int, val missing: Int, val syncing: List<SyncService.Live>)
+@Serializable class Health(val version: String, val works: Int, val ready: Int, val preparing: Int, val missing: Int, val syncing: List<SyncService.Live>, val libraryNotes: List<String> = emptyList(), val libraryEmpty: List<String> = emptyList())
 @Serializable class WorkDetail(val work: Work, val shelf: String, val tracks: List<TrackInfo>, val chapters: List<ChapterInfo>, val units: List<UnitInfo>, val sentencesAligned: Int, val position: Position?, val speed: Speed? = null)
 @Serializable class WorkRow(val work: Work, val shelf: String)
 @Serializable class WorkMarks(val work: String, val title: String, val author: String, val passages: Int, val marks: List<Mark>)
@@ -84,7 +84,6 @@ private val TokenKey = AttributeKey<String>("token")
  */
 fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, users: Users, stats: Stats, lists: Lists, rescan: () -> Unit) {
     val lookup = MetaLookup()
-    val links = DeviceLinks(users)
     embeddedServer(Netty, port = config.port, host = "0.0.0.0") {
         install(ContentNegotiation) { json(Json { encodeDefaults = true; ignoreUnknownKeys = true }) }
         // Headers for every response: the page may not be framed, types are not sniffed, and scripts come from here only.
@@ -103,19 +102,19 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
             exception<Throwable> { call, e -> call.application.environment.log.error("Request failed", e); call.respond(HttpStatusCode.InternalServerError, Message(e.message ?: e.javaClass.simpleName)) }
         }
         routing {
-            // The web client: a static single-page app at the root; unknown paths fall back to it.
+            // The web client: a static page at the root, routed by the hash, so nothing falls back to it: a path that is not a file is a 404.
             // The client is a handful of files that change with every deploy; browsers must ask each time.
-            staticResources("/", "web") { default("index.html"); cacheControl { listOf(CacheControl.NoCache(null)) } }
+            staticResources("/", "web") { cacheControl { listOf(CacheControl.NoCache(null)) } }
             get("/api/health") {
                 // Anyone may ask whether the server is up; what it is syncing is for signed-in people.
-                val works = catalog.works()
+                val (total, ready, preparing, missing) = catalog.shelfCounts()
                 val signedIn = bearer(call)?.let { users.authenticate(it) } != null
-                call.respond(Health(Version.NAME, works.size, works.count { it.shelf == "ready" }, works.count { it.shelf == "preparing" }, works.count { it.shelf == "missing" }, if (signedIn) sync.live() else emptyList()))
+                call.respond(Health(Version.NAME, total, ready, preparing, missing, if (signedIn) sync.live() else emptyList(), if (signedIn) scanner.unreachableNotes() else emptyList(), if (signedIn) scanner.emptied + listOfNotNull(Scanner.PARTIAL.takeIf { scanner.partial != null }) else emptyList()))
             }
             route("/api") {
                 intercept(ApplicationCallPipeline.Plugins) {
                     val path = call.request.path()
-                    if (!path.startsWith("/api") || path == "/api/health" || path == "/api/login" || path == "/api/setup" || path == "/api/link/start" || path == "/api/link/claim") return@intercept
+                    if (!path.startsWith("/api") || path == "/api/health" || path == "/api/login" || path == "/api/setup") return@intercept
                     val presented = bearer(call) ?: if (cookieMayAuthorize(path, call.request.httpMethod)) call.request.cookies[COOKIE] else null
                     val user = presented?.let { users.authenticate(it) }
                     if (user == null) { call.respond(HttpStatusCode.Unauthorized, Message("Sign in first")); finish(); return@intercept }
@@ -179,47 +178,8 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                         call.respond(LoginAnswer(token, admin))
                     }
                 }
-                // Signing in a watch by a code (DeviceLinks): the device asks for a code without a sign-in, shows it, and
-                // then asks with its secret until a signed-in person has approved the code (/me/link below).
-                post("/link/start") {
-                    val address = clientAddress(call)
-                    val started = links.start(call.receive<LinkStart>().device, address)
-                        ?: return@post call.respond(HttpStatusCode.TooManyRequests, Message("Too many sign-in codes are waiting. Try again in a few minutes."))
-                    call.respond(started)
-                }
-                post("/link/claim") {
-                    val status = links.claim(call.receive<LinkClaim>().secret) ?: return@post call.respond(HttpStatusCode.Gone, Message("This code has expired. Ask for a new one."))
-                    status.user?.let { users.audit(it.name, "signed in", clientAddress(call), "by code") }
-                    call.respond(status)
-                }
                 route("/me") {
                     get { call.respond(Me(call.user, users.tokens(call.user.id))) }
-                    // The code a watch is showing: who is asking (GET), and yes, sign it in as me (POST). Wrong codes are
-                    // slowed like wrong passwords, under their own key.
-                    route("/link/{code}") {
-                        suspend fun blocked(call: ApplicationCall): Boolean {
-                            val wait = users.throttle.blocked("link:${call.user.id}") ?: return false
-                            call.response.header(HttpHeaders.RetryAfter, wait.toString())
-                            call.respond(HttpStatusCode.TooManyRequests, Message("Too many attempts. Try again in ${if (wait >= 120) "${(wait + 59) / 60} minutes" else "$wait seconds"}."))
-                            return true
-                        }
-                        suspend fun unknown(call: ApplicationCall) {
-                            users.throttle.fail("link:${call.user.id}")
-                            call.respond(HttpStatusCode.NotFound, Message("No device is waiting with that code. Check the code on the watch; a code lasts ten minutes."))
-                        }
-                        get {
-                            if (blocked(call)) return@get
-                            val info = links.info(call.parameters["code"] ?: "") ?: return@get unknown(call)
-                            call.respond(info)
-                        }
-                        post {
-                            if (blocked(call)) return@post
-                            val info = links.approve(call.parameters["code"] ?: "", call.user.id) ?: return@post unknown(call)
-                            users.throttle.clear("link:${call.user.id}")
-                            users.audit(call.user.name, "sign-in code approved", clientAddress(call), "${info.device} at ${info.address}")
-                            call.respond(info)
-                        }
-                    }
                     delete("/tokens/{prefix}") {
                         val prefix = (call.parameters["prefix"] ?: "").removeSuffix("…")
                         users.revoke(call.user.id, prefix)
@@ -245,8 +205,8 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                                 return@post call.respond(HttpStatusCode.Forbidden, Message("The current password is wrong"))
                             }
                         }
-                        users.setPassword(me.id, req.password); users.throttle.clear(key)
-                        users.audit(me.name, "password changed", clientAddress(call)); call.respond(Message("Password set"))
+                        val others = users.setPassword(me.id, req.password, call.attributes[TokenKey]); users.throttle.clear(key)
+                        users.audit(me.name, "password changed", clientAddress(call), "$others other devices signed out"); call.respond(Message("Password set"))
                     }
                     // A browser signed in before cookies existed asks for one with the token it already holds.
                     post("/cookie") { val t = bearer(call) ?: throw IllegalArgumentException("Bearer token required"); call.response.cookies.append(sessionCookie(call, t, (Users.WEB_IDLE_MS / 1000).toInt())); call.respond(Message("Cookie set")) }
@@ -264,7 +224,7 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     // Collections made by hand, and Want to read (always there, first). {id} is a collection's number or "want".
                     route("/collections") {
                         val known: (String) -> Boolean = { catalog.work(it) != null }
-                        fun all(call: ApplicationCall): List<Collection> { val ids = catalog.allIds().toSet(); return lists.collections(call.user.id) { it in ids } }
+                        fun all(call: ApplicationCall): List<Collection> { val ids = catalog.visibleIds().toSet(); return lists.collections(call.user.id) { it in ids } }
                         get { call.respond(all(call)) }
                         post { val c = lists.createCollection(call.user.id, call.receive<NameChange>().name); call.respond(c) }
                         put("/{id}") { val c = lists.renameCollection(call.user.id, call.parameters["id"] ?: "", call.receive<NameChange>().name); call.respond(all(call).first { it.id == c.id }) }
@@ -283,7 +243,9 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     delete("/shelf/{work}") { users.unshelve(call.user.id, call.parameters["work"] ?: ""); call.respond(Message("Removed")) }
                     // Everything one person marked, a book at a time, most recently marked book first.
                     get("/marks") {
-                        call.respond(users.allMarks(call.user.id).mapNotNull { (id, marks) -> catalog.work(id)?.let { WorkMarks(id, it.title, it.author, it.passages, marks) } }.sortedByDescending { w -> w.marks.maxOf { it.created } })
+                        val marked = users.allMarks(call.user.id)
+                        val byId = catalog.worksByIds(marked.keys).associateBy { it.id }
+                        call.respond(marked.mapNotNull { (id, marks) -> byId[id]?.let { WorkMarks(id, it.title, it.author, it.passages, marks) } }.sortedByDescending { w -> w.marks.maxOf { it.created } })
                     }
                     get("/marks/{work}") { call.respond(users.marks(call.user.id, call.parameters["work"] ?: "")) }
                     put("/marks/{work}") { users.setMark(call.user.id, call.parameters["work"] ?: "", call.receive<Mark>()); call.respond(Message("Marked")) }
@@ -292,13 +254,13 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     post("/sessions") { val kept = stats.record(call.user.id, device(call), call.receive<List<SessionIn>>()); call.respond(Message("Recorded $kept")) }
                     get("/stats") {
                         val finished = users.shelf(call.user.id).count { it.state == "finished" }
-                        call.respond(stats.report(call.user.id, finished, zone(call, stats)) { id -> catalog.work(id)?.let { it.title to it.author } })
+                        call.respond(stats.report(call.user.id, finished, zone(call, stats)) { ids -> catalog.worksByIds(ids).associate { it.id to (it.title to it.author) } })
                     }
                     // The year in review: this year, or the one asked for.
                     get("/year/{year?}") {
                         val year = call.parameters["year"]?.let { it.toIntOrNull()?.takeIf { y -> y in 2000..2200 } ?: throw IllegalArgumentException("A year, like 2026") }
                         val finishedAt = users.shelf(call.user.id).filter { it.state == "finished" }.map { it.work to (it.finishedAt ?: 0L) }
-                        call.respond(stats.year(call.user.id, year, finishedAt, zone(call, stats)) { id -> catalog.work(id)?.let { it.title to it.author } })
+                        call.respond(stats.year(call.user.id, year, finishedAt, zone(call, stats)) { ids -> catalog.worksByIds(ids).associate { it.id to (it.title to it.author) } })
                     }
                 }
                 route("/users") {
@@ -320,7 +282,7 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     delete("/{id}/tokens") { requireAdmin(call); val id = call.parameters["id"]?.toLongOrNull() ?: throw IllegalArgumentException("User id required"); val n = users.revokeAll(id); users.audit(call.user.name, "signed out everywhere", clientAddress(call), "${users.byId(id)?.name ?: "?"} ($n devices)"); call.respond(Message("Signed out of $n devices")) }
                     post { requireAdmin(call); val n = call.receive<NewUser>(); val u = users.create(n.name, n.password, n.role); users.audit(call.user.name, "member added", clientAddress(call), "${u.name} (${u.role})"); call.respond(u) }
                     delete("/{id}") { requireAdmin(call); val id = call.parameters["id"]?.toLongOrNull() ?: throw IllegalArgumentException("User id required"); val name = users.byId(id)?.name ?: "?"; users.delete(id); users.audit(call.user.name, "member removed", clientAddress(call), name); call.respond(Message("Removed")) }
-                    post("/{id}/password") { requireAdmin(call); val id = call.parameters["id"]?.toLongOrNull() ?: throw IllegalArgumentException("User id required"); users.setPassword(id, call.receive<PasswordChange>().password); users.audit(call.user.name, "password set", clientAddress(call), users.byId(id)?.name ?: "?"); call.respond(Message("Password set")) }
+                    post("/{id}/password") { requireAdmin(call); val id = call.parameters["id"]?.toLongOrNull() ?: throw IllegalArgumentException("User id required"); val n = users.setPassword(id, call.receive<PasswordChange>().password); users.audit(call.user.name, "password set", clientAddress(call), "${users.byId(id)?.name ?: "?"} ($n devices signed out)"); call.respond(Message("Password set")) }
                 }
                 // The pairing overview: audiobooks without an ebook (with the ebooks by the same author as
                 // suggestions), ebooks without audio, and what the admin has already marked audio-only.
@@ -332,6 +294,13 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     val byAuthor = ebookOnly.groupBy { Scanner.authorKey(it.author) }
                     val suggestions = unpaired.associate { a -> a.id to (byAuthor[Scanner.authorKey(a.author)] ?: emptyList()).map { it.id } }
                     call.respond(PairingOverview(all.filter { it.audioOnly }, unpaired, ebookOnly, suggestions))
+                }
+                post("/scan/accept-empty") {
+                    requireAdmin(call)
+                    val library = call.request.queryParameters["library"].orEmpty()
+                    val partial = library == Scanner.PARTIAL
+                    if (!scanner.acceptEmpty(library)) throw IllegalArgumentException(if (partial) "No held-back scan is waiting" else "That library is not empty, or could not be read")
+                    users.audit(call.user.name, if (partial) "scan accepted: books not found may be hidden" else "library accepted as empty: $library", clientAddress(call)); Thread { rescan() }.start(); call.respond(Message("Scanning"))
                 }
                 post("/scan") { requireAdmin(call); users.audit(call.user.name, "library rescan", clientAddress(call)); Thread { rescan() }.start(); call.respond(Message("Scanning")) }
                 // The wanted list: books the library does not have yet. Anyone in the household asks and sees the list;
@@ -387,14 +356,18 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     // ?q= searches title, subtitle, authors, narrators and series; ?shelf= filters ready|preparing|missing.
                     val q = call.request.queryParameters["q"].orEmpty()
                     val shelf = call.request.queryParameters["shelf"]
-                    call.respond(catalog.search(q).filter { shelf == null || it.shelf == shelf }.map { WorkRow(it, it.shelf) })
+                    val format = formatOf(call)
+                    call.respond(catalog.search(q).filter { shelf == null || it.shelf == shelf }.filter { format == null || (if (format == "ebook") it.hasEbook else it.hasAudio) }.map { WorkRow(it, it.shelf) })
                 }
-                get("/series") { call.respond(catalog.series()) }
-                get("/series/{name}") { call.respond(catalog.seriesWorks(call.parameters["name"] ?: "").map { WorkRow(it, it.shelf) }) }
-                get("/authors") { call.respond(catalog.people("author")) }
-                get("/authors/{name}") { call.respond(catalog.personWorks("author", call.parameters["name"] ?: "").map { WorkRow(it, it.shelf) }) }
-                get("/narrators") { call.respond(catalog.people("narrator")) }
-                get("/narrators/{name}") { call.respond(catalog.personWorks("narrator", call.parameters["name"] ?: "").map { WorkRow(it, it.shelf) }) }
+                // ?format=ebook|audio on these routes keeps to works with that format (absent: all); another value is a 400.
+                get("/series") { call.respond(catalog.series(formatOf(call))) }
+                get("/series/{name}") { call.respond(catalog.seriesWorks(call.parameters["name"] ?: "", formatOf(call)).map { WorkRow(it, it.shelf) }) }
+                get("/authors") { call.respond(catalog.people("author", formatOf(call))) }
+                get("/authors/{name}") { call.respond(catalog.personWorks("author", call.parameters["name"] ?: "", formatOf(call)).map { WorkRow(it, it.shelf) }) }
+                get("/narrators") { call.respond(catalog.people("narrator", formatOf(call))) }
+                get("/narrators/{name}") { call.respond(catalog.personWorks("narrator", call.parameters["name"] ?: "", formatOf(call)).map { WorkRow(it, it.shelf) }) }
+                get("/genres") { call.respond(catalog.genres(formatOf(call))) }
+                get("/genres/{name}") { call.respond(catalog.genreWorks(call.parameters["name"] ?: "", formatOf(call)).map { WorkRow(it, it.shelf) }) }
                 route("/works/{id}") {
                     get {
                         val w = work(call, catalog)
@@ -445,7 +418,7 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     }
                     get("/cover") {
                         val file = catalog.coverPath(work(call, catalog).id)?.let(::File)?.takeIf { it.isFile } ?: return@get call.respond(HttpStatusCode.NotFound, Message("No cover"))
-                        serve(call, file, if (file.extension.lowercase() == "png") ContentType.Image.PNG else ContentType.Image.JPEG)
+                        serve(call, file, when (file.extension.lowercase()) { "png" -> ContentType.Image.PNG; "webp" -> ContentType("image", "webp"); else -> ContentType.Image.JPEG })
                     }
                     get("/audio/{n}") {
                         val w = work(call, catalog)
@@ -477,11 +450,13 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                     post("/position") { savePosition(call) }
                     post("/sync") {
                         val w = work(call, catalog)
-                        if (call.request.queryParameters["restart"] == "true") sync.restart(w.id)
+                        val restart = call.request.queryParameters["restart"] == "true"
+                        requireSyncRights(call.user.role, restart = restart)
+                        if (restart) { sync.restart(w.id); users.audit(call.user.name, "sync restarted", clientAddress(call), w.title) }
                         else if (!sync.request(w.id)) return@post call.respond(HttpStatusCode.Conflict, Message("This work needs both an ebook and an audiobook before it can sync"))
                         call.respond(Message("Syncing"))
                     }
-                    delete("/sync") { sync.cancel(work(call, catalog).id); call.respond(Message("Pausing")) }
+                    delete("/sync") { requireSyncRights(call.user.role, restart = false, pause = true); sync.cancel(work(call, catalog).id); call.respond(Message("Pausing")) }
                     // Audio-only: this audiobook has no ebook to wait for; it is ready to listen to as it is.
                     put("/audio-only") {
                         requireAdmin(call)
@@ -514,12 +489,17 @@ fun api(config: Config, catalog: Catalog, scanner: Scanner, sync: SyncService, u
                         call.respond(Message("Paired; rescanning"))
                     }
                 }
+                // Anything under /api that no route above took, for any method (signed-in callers only: the check above answers the rest with 401).
+                route("{...}") { handle { call.respond(HttpStatusCode.NotFound, Message("Not found")) } }
             }
         }
     }.start(wait = true)
 }
 
-private fun requireAdmin(call: ApplicationCall) { if (call.user.role != "admin") throw IllegalArgumentException("Only an admin can do that") }
+private fun requireAdmin(call: ApplicationCall) = requireAdminRole(call.user.role)
+internal fun requireAdminRole(role: String) { if (role != "admin") throw IllegalArgumentException("Only an admin can do that") }
+/** Starting a sync is open to the household; pausing one or wiping its alignment to start again is an admin's. */
+internal fun requireSyncRights(role: String, restart: Boolean, pause: Boolean = false) { if (restart || pause) requireAdminRole(role) }
 
 private const val COOKIE = "unison"
 private fun bearer(call: ApplicationCall) = call.request.header(HttpHeaders.Authorization)?.removePrefix("Bearer ")?.trim()?.takeIf { it.isNotEmpty() }
@@ -538,6 +518,10 @@ private fun clientAddress(call: ApplicationCall): String {
     val forwarded = call.request.header("X-Forwarded-For")?.split(',')?.firstOrNull()?.trim()
     return if (private && !forwarded.isNullOrBlank()) forwarded else remote
 }
+
+/** The ?format= of a list request: "ebook", "audio" or null; anything else is a 400. */
+private fun formatOf(call: ApplicationCall): String? =
+    call.request.queryParameters["format"]?.also { require(it == "ebook" || it == "audio") { "format must be ebook or audio" } }
 
 private fun work(call: ApplicationCall, catalog: Catalog): Work =
     catalog.work(call.parameters["id"] ?: throw IllegalArgumentException("Work id required")) ?: throw IllegalArgumentException("Unknown work")

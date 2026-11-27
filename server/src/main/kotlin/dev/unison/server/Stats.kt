@@ -29,10 +29,16 @@ import kotlinx.serialization.Serializable
 
 /**
  * Listening and reading sessions, as the app reports them, and the numbers made from them. A session
- * shorter than three seconds is noise and is dropped. Days and hours are counted in the time zone of whoever asks
+ * shorter than three seconds is noise and is dropped, and so is one longer than a day or ending more than ten minutes
+ * after the server's clock. Days and hours are counted in the time zone of whoever asks
  * (clients send theirs as `X-Timezone`); the server's own zone is the fallback for clients that send none.
  */
-class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemDefault()) {
+class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemDefault(), private val clock: () -> Long = System::currentTimeMillis) {
+    private companion object {
+        const val MAX_SESSION_MS = 24L * 60 * 60 * 1000
+        const val CLOCK_SLACK_MS = 10L * 60 * 1000
+    }
+
     init {
         synchronized(db) {
             db.createStatement().use { s ->
@@ -61,6 +67,8 @@ class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemD
         for (s in sessions) {
             if (s.kind != "listen" && s.kind != "read") continue
             if (s.ended - s.started < 3000) continue
+            // Nobody listens for more than a day at a stretch, and a session cannot end in the future (a little slack for clocks).
+            if (s.ended - s.started > MAX_SESSION_MS || s.ended > clock() + CLOCK_SLACK_MS) continue
             // The same session sent twice (a retry) is stored once.
             if (query("SELECT 1 FROM sessions WHERE user = ? AND work = ? AND kind = ? AND started = ?", user, s.work, s.kind, s.started) { 1 }.isNotEmpty()) continue
             exec("INSERT INTO sessions (user, work, kind, device, started, ended, sentences, pages) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", user, s.work, s.kind, device.take(60), s.started, s.ended, s.sentences, s.pages)
@@ -75,7 +83,7 @@ class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemD
     }
 
     /** The year in review: `year` null means this year; `finishedAt` is every finished work with the moment it was finished. */
-    fun year(user: Long, year: Int?, finishedAt: List<Pair<String, Long>>, zone: ZoneId = defaultZone, titles: (String) -> Pair<String, String>?): YearReport {
+    fun year(user: Long, year: Int?, finishedAt: List<Pair<String, Long>>, zone: ZoneId = defaultZone, titles: (Set<String>) -> Map<String, Pair<String, String>>): YearReport {
         val all = query("SELECT work, kind, started, ended, sentences, pages FROM sessions WHERE user = ? ORDER BY started", user) { Row(it.getString(1), it.getString(2), it.getLong(3), it.getLong(4), it.getInt(5), it.getInt(6)) }
         val y = year ?: LocalDate.now(zone).year
         fun day(d: LocalDate, sel: List<Row>) = DayStat(d.toString(), sel.filter { it.kind == "listen" }.sumOf { it.ms }, sel.filter { it.kind == "read" }.sumOf { it.ms })
@@ -87,12 +95,13 @@ class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemD
         var longest = 0; var run = 0; var prev: LocalDate? = null
         for (d in inYear.keys.sorted()) { run = if (prev != null && prev.plusDays(1) == d) run + 1 else 1; if (run > longest) longest = run; prev = d }
         val hours = LongArray(24); for (r in rows) hours[Instant.ofEpochMilli(r.started).atZone(zone).hour] += r.ms
+        val finishedInYear = finishedAt.filter { it.second > 0 && Instant.ofEpochMilli(it.second).atZone(zone).year == y }.sortedBy { it.second }
+        val named = titles(rows.map { it.work }.toSet() + finishedInYear.map { it.first })
         val books = rows.groupBy { it.work }.map { (work, sel) ->
-            val (title, author) = titles(work) ?: ("A book no longer on the server" to "")
+            val (title, author) = named[work] ?: ("A book no longer on the server" to "")
             BookStat(work, title, author, sel.filter { it.kind == "listen" }.sumOf { it.ms }, sel.filter { it.kind == "read" }.sumOf { it.ms }, sel.sumOf { it.sentences })
         }.sortedByDescending { it.listenMs + it.readMs }
-        val finished = finishedAt.filter { it.second > 0 && Instant.ofEpochMilli(it.second).atZone(zone).year == y }.sortedBy { it.second }
-            .mapNotNull { (work, at) -> titles(work)?.let { FinishedBook(work, it.first, it.second, at) } }
+        val finished = finishedInYear.mapNotNull { (work, at) -> named[work]?.let { FinishedBook(work, it.first, it.second, at) } }
         val years = (all.map { it.date(zone).year } + finishedAt.filter { it.second > 0 }.map { Instant.ofEpochMilli(it.second).atZone(zone).year } + LocalDate.now(zone).year + y).distinct().sortedDescending()
         return YearReport(
             year = y, years = years,
@@ -108,7 +117,7 @@ class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemD
         )
     }
 
-    fun report(user: Long, finished: Int, zone: ZoneId = defaultZone, titles: (String) -> Pair<String, String>?): StatsReport {
+    fun report(user: Long, finished: Int, zone: ZoneId = defaultZone, titles: (Set<String>) -> Map<String, Pair<String, String>>): StatsReport {
         val rows = query("SELECT work, kind, started, ended, sentences, pages FROM sessions WHERE user = ? ORDER BY started", user) { Row(it.getString(1), it.getString(2), it.getLong(3), it.getLong(4), it.getInt(5), it.getInt(6)) }
         val today = LocalDate.now(zone)
         fun totals(from: LocalDate?): Totals {
@@ -129,10 +138,13 @@ class Stats(private val db: Connection, val defaultZone: ZoneId = ZoneId.systemD
         }
         val hours = LongArray(24)
         for (r in rows) hours[Instant.ofEpochMilli(r.started).atZone(zone).hour] += r.ms
-        val books = rows.groupBy { it.work }.map { (work, sel) ->
-            val (title, author) = titles(work) ?: ("A book no longer on the server" to "")
+        // Only the twenty shown need a title; the order depends on time alone.
+        val busiest = rows.groupBy { it.work }.entries.sortedByDescending { (_, sel) -> sel.sumOf { it.ms } }.take(20)
+        val named = titles(busiest.map { it.key }.toSet())
+        val books = busiest.map { (work, sel) ->
+            val (title, author) = named[work] ?: ("A book no longer on the server" to "")
             BookStat(work, title, author, sel.filter { it.kind == "listen" }.sumOf { it.ms }, sel.filter { it.kind == "read" }.sumOf { it.ms }, sel.sumOf { it.sentences })
-        }.sortedByDescending { it.listenMs + it.readMs }.take(20)
+        }
         return StatsReport(
             today = totals(today), week = totals(today.minusDays(6)), month = totals(today.withDayOfMonth(1)), year = totals(today.withDayOfYear(1)), all = totals(null),
             streak = streak, longestStreak = longest, daysActive = activeDays.size, finished = finished,

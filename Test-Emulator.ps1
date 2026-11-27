@@ -2,8 +2,8 @@ param([switch]$ImportFixtures, [switch]$FullSync, [string[]]$Modes=@('core','rea
 $ErrorActionPreference='Stop'
 Set-Location $PSScriptRoot
 . "$PSScriptRoot\Enter-Android.ps1"
-# Which device: -Serial, or the one emulator that is running. With a watch emulator up as well there are two, and
-# the phone's has to be named (adb devices lists them).
+# Which device: -Serial, or the one emulator that is running. With more than one emulator up, the one to use
+# has to be named (adb devices lists them).
 if (-not $Serial) {
     $running = @(& adb devices | Where-Object { $_ -match '^(emulator-\d+)\s+device' } | ForEach-Object { $Matches[1] })
     if ($running.Count -ne 1) { throw "$($running.Count) emulators are running ($($running -join ', ')): say which with -Serial." }

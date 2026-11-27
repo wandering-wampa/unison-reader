@@ -42,6 +42,36 @@ class BookIdentityTest {
         assertEquals("wanted", lists.request(request.id, -1)!!.status)
     }
 
+    @Test fun `asking again for a wanted book widens the kind and adds the new note`() = library { _, lists ->
+        var changes = 0
+        lists.onRequestsChanged = { changes++ }
+        val first = lists.addRequest(null, "Reader", "Dune", "Frank Herbert", "", "ebook", "web")!!
+        assertEquals(1, changes)
+        // Nothing new: nothing changes and nobody is told.
+        assertEquals(first.id, lists.addRequest(null, "Other", "dune", "Frank Herbert", "", "ebook", "web")!!.id)
+        assertEquals(1, changes)
+        val widened = lists.addRequest(null, "Other", "Dune", "frank herbert", "the 2021 edition", "audiobook", "web")!!
+        assertEquals(first.id, widened.id)
+        assertEquals("both", widened.kind)
+        assertEquals("the 2021 edition", widened.note)
+        assertEquals(2, changes)
+        // A note already contained is not added again; a different one goes on a new line; both stays both.
+        assertEquals("the 2021 edition", lists.addRequest(null, "Other", "Dune", "Frank Herbert", "2021 edition", "both", "web")!!.note)
+        assertEquals(2, changes)
+        assertEquals("the 2021 edition\nnarrated by a cast", lists.addRequest(null, "Other", "Dune", "Frank Herbert", " narrated by a cast ", "ebook", "web")!!.note)
+        assertEquals("both", lists.request(first.id, -1)!!.kind)
+        assertEquals(3, changes)
+        assertEquals(1, lists.requests(-1).size)
+    }
+
+    @Test fun `a note that would not fit is not added to a wanted book`() = library { _, lists ->
+        val long = "x".repeat(450)
+        val first = lists.addRequest(null, "Reader", "Dune", "", long, "ebook", "web")!!
+        val again = lists.addRequest(null, "Other", "Dune", "", "y".repeat(100), "ebook", "web")!!
+        assertEquals(first.id, again.id)
+        assertEquals(long, again.note)
+    }
+
     private fun scanner(catalog: Catalog) = Scanner(Config(File("audio"), File("ebooks"), File("data"), File("model"), "", 0, 0), catalog)
     private fun ebook(title: String, author: String, series: List<SeriesRef> = emptyList(), suffix: String = "") =
         Scanner.EbookEntry(title, author, File("/fixture/ebooks/$title$suffix.epub"), "epub", null, Meta(authors = listOf(author), series = series))

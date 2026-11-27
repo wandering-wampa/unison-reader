@@ -438,6 +438,16 @@ function applyFound(){
 window.readerFound=id=>{foundId=id;try{applyFound()}catch(e){}}
 // A long-press selection (and the Copy menu that rides on it) has done its job once narration starts.
 window.readerSelection=()=>{for(const {doc} of view?.renderer?.getContents()||[]){const s=doc.getSelection()?.toString();if(s)return s}return ''}
+// The first and last sentence the selection touches, as [first,last]; null when nothing is selected.
+window.readerSelectionSpan=()=>{
+    for(const {doc,index} of view?.renderer?.getContents()||[]){
+        const sel=doc.getSelection();if(!sel||sel.isCollapsed||!sel.rangeCount)continue
+        const range=sel.getRangeAt(0)
+        const ids=mapDocument(doc,index).ranges.filter(r=>r.range.compareBoundaryPoints(Range.START_TO_END,range)>0&&r.range.compareBoundaryPoints(Range.END_TO_START,range)<0).map(r=>r.id)
+        if(ids.length)return[Math.min(...ids),Math.max(...ids)]
+    }
+    return null
+}
 window.readerClearSelection=()=>{for(const {doc} of view?.renderer?.getContents()||[])try{doc.getSelection()?.removeAllRanges()}catch(e){}}
 const flattenToc=(items,depth=0)=>(items||[]).flatMap(item=>[{...item,label:'  '.repeat(depth)+item.label},...flattenToc(item.subitems,depth+1)])
 window.readerToc=()=>JSON.stringify(flattenToc(view.book.toc).map(item=>item.label))

@@ -24,7 +24,14 @@ import org.slf4j.LoggerFactory
  * the Calibre library, and Calibre's metadata.db is copied aside before it is opened so SQLite never
  * creates journal files there.
  */
-class Scanner(private val config: Config, private val catalog: Catalog) {
+class Scanner(
+    private val config: Config, private val catalog: Catalog,
+    /** Replaces ffprobe (tests). */
+    private val prober: ((List<File>) -> Probed)? = null,
+    /** Takes the picture embedded in an audio file into the second file; false when there is none (tests replace ffmpeg). */
+    private val artExtractor: ((File, File) -> Boolean)? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
     private val log = LoggerFactory.getLogger("Scanner")
     private val audioExtensions = setOf("m4b", "m4a", "mp3", "flac", "ogg", "opus", "aac", "wav")
     private val json = Json { ignoreUnknownKeys = true }
@@ -48,14 +55,35 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
 
     private fun pass(): Int {
         var changed = 0
-        val ebooks = if (File(config.ebooks, "metadata.db").isFile) calibreBooks() else folderBooks()
-        val audio = audiobooks()
+        var ebooksReadable = readable(config.ebooks)
+        val audioReadable = readable(config.audiobooks)
+        // A Calibre database that cannot be copied is as good as an ebook folder that cannot be read.
+        val ebooks = if (!ebooksReadable) emptyList() else if (File(config.ebooks, "metadata.db").isFile) (calibreBooks() ?: run { ebooksReadable = false; emptyList() }) else folderBooks()
+        val audio = if (audioReadable) audiobooks() else emptyList()
+        // A library that cannot be read, or that is empty though the catalog knows books on that side, is a mount
+        // that is down, not books that were removed: nothing is changed until it answers again.
+        // An admin can accept an empty library as meant (never an unreadable one); the acceptance ends
+        // the first time the library lists something again.
+        fun check(name: String, readable: Boolean, count: Int, known: Int): Boolean {
+            if (readable && count > 0) { if (catalog.acceptedEmpty(name)) catalog.setAcceptedEmpty(name, false); return true }
+            if (readable && (known == 0 || catalog.acceptedEmpty(name))) return true
+            if (!readable) unreadable += name else emptied += name
+            return false
+        }
+        unreadable = emptyList(); emptied = emptyList(); partial = null
+        val ebooksOk = check("ebook", ebooksReadable, ebooks.size, catalog.countWithEbook())
+        val audioOk = check("audiobook", audioReadable, audio.size, catalog.countWithAudio())
+        if (!ebooksOk || !audioOk) {
+            log.warn("The ${(unreadable + emptied).joinToString(" and ") { "$it folder" }} could not be read or is empty though books are known from it; nothing was changed in this pass")
+            return 0
+        }
+        val presentBefore = catalog.countPresent()
         val seen = HashSet<String>()
         for (e in ebooks) {
             val id = workFor(e.title, e.author, seen)
             val stamp = e.path.lastModified() xor e.path.length()
             // An EPUB that never yielded sentences is tried again unless this very parser version already failed on it.
-            val known = catalog.work(id)
+            val known = catalog.workIncludingMissing(id)
             val failedHere = "Ebook could not be read (parser ${Ebooks.VERSION})"
             val retry = known != null && known.passages == 0 && e.format == "epub" && !known.status.startsWith(failedHere)
             if (catalog.stamps(id)?.first != stamp || retry) {
@@ -77,13 +105,13 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
             val files = audioFiles(a.dir)
             val stamp = files.fold(0L) { acc, f -> acc * 31 + f.lastModified() + f.length() }
             if (catalog.stamps(id)?.second != stamp) {
-                val probed = probe(files)
-                val cover = listOf("cover.jpg", "cover.png", "folder.jpg", "folder.png").map { File(a.dir, it) }.firstOrNull { it.isFile }
-                catalog.setAudio(id, a.dir.path, stamp, probed.narrator, probed.tracks, probed.chapters, cover?.path)
+                val probed = prober?.invoke(files) ?: probe(files)
+                catalog.setAudio(id, a.dir.path, stamp, probed.narrator, probed.tracks, probed.chapters, null)
                 catalog.setMeta(id, 1, probed.meta)
                 catalog.setMeta(id, 0, folderMeta(a.title))
                 changed++
             }
+            audioCover(id, a.dir, files, stamp)
             // Audiobookshelf's sidecar, when it keeps one beside the files, is the best audio-side source.
             val sidecar = File(a.dir, "metadata.json")
             if (sidecar.isFile && (sidecar.lastModified() != sidecarSeen[id] || metaRefresh)) {
@@ -91,11 +119,118 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
                 sidecarSeen[id] = sidecar.lastModified()
             }
         }
-        // Works whose files are gone leave the catalog (their sync data goes with them).
-        for (id in catalog.allIds()) if (id !in seen) { catalog.removeWork(id); changed++ }
+        // Works whose files are gone are hidden first, with everything they had; only after the grace period are they deleted.
+        val now = clock()
+        // A listing that lacks more than a quarter of the works that are visible (and at least five) is a library
+        // that was only partly read, not that many books removed: nothing is hidden until an admin accepts it.
+        val ids = catalog.allIds()
+        val vanishing = ids.count { it !in seen && catalog.missingSince(it) == null }
+        if (vanishing >= PARTIAL_MIN && vanishing * 4 > presentBefore) {
+            if (catalog.acceptedEmpty(PARTIAL)) catalog.setAcceptedEmpty(PARTIAL, false)
+            else {
+                partial = "$vanishing of the $presentBefore books the server knows were not found at the last check. Nothing was hidden."
+                log.warn("$vanishing of $presentBefore books were not found in this pass; nothing was hidden until an admin accepts it")
+                metaRefresh = false
+                return changed
+            }
+        } else if (catalog.acceptedEmpty(PARTIAL)) catalog.setAcceptedEmpty(PARTIAL, false)
+        for (id in ids) if (id !in seen) {
+            val since = catalog.missingSince(id)
+            if (since == null) { catalog.markMissing(id, now); changed++ }
+            else if (now - since > MISSING_GRACE_MS) { catalog.removeWork(id); changed++ }
+        }
         metaRefresh = false
         return changed
     }
+
+    /**
+     * Gives a work that has no cover one from its audiobook, in this order: cover/folder .jpg/.png (any case), another
+     * picture in the folder (a name with cover, folder or front first, else the largest), then art embedded in the
+     * first audio file, extracted into the data folder. A work that already has a cover file (its ebook's, or an
+     * earlier find) is left alone. The folder listing is cheap and repeats on every pass while a book has no cover,
+     * so a picture added later is noticed; ffmpeg runs once per audio stamp (`cover_checked`).
+     * A new cover moves the work's `updated` and turns its `cover` flag on, which is what clients read.
+     */
+    private fun audioCover(id: String, dir: File, files: List<File>, stamp: Long) {
+        if (catalog.libraryCover(id)?.let { File(it).isFile } == true) return
+        val picture = folderPicture(dir)
+        if (picture != null) { catalog.setCover(id, picture.path); return }
+        if (files.isEmpty() || catalog.coverChecked(id) == stamp) return
+        val target = File(config.data, "audio-covers/${sha(dir.path)}.jpg")
+        val found = try {
+            target.parentFile.mkdirs()
+            val ok = (artExtractor ?: ::ffmpegArt)(files.first(), target) && isPicture(target)
+            if (!ok) target.delete()
+            ok
+        } catch (e: Exception) {
+            log.info("No embedded cover from ${files.first().name}: ${e.message}")
+            target.delete()
+            false
+        }
+        catalog.setCoverChecked(id, stamp)
+        if (found) catalog.setCover(id, target.path)
+    }
+
+    private val pictureExtensions = setOf("jpg", "jpeg", "png", "webp")
+
+    /** The folder's cover picture (not subfolders), or null. */
+    private fun folderPicture(dir: File): File? {
+        val pictures = dir.listFiles()?.filter { it.isFile && !it.name.startsWith(".") && it.extension.lowercase() in pictureExtensions }?.sortedWith(naturalOrder) ?: return null
+        for (name in listOf("cover.jpg", "cover.png", "folder.jpg", "folder.png")) pictures.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let { return it }
+        val preferred = pictures.filter { p -> listOf("cover", "folder", "front").any { p.name.contains(it, ignoreCase = true) } }
+        return (preferred.ifEmpty { pictures }).maxByOrNull { it.length() }
+    }
+
+    /** True for a file ImageIO can read, or one whose first bytes are a JPEG, PNG or WebP header. */
+    private fun isPicture(file: File): Boolean {
+        if (!file.isFile || file.length() == 0L) return false
+        if (runCatching { javax.imageio.ImageIO.read(file) != null }.getOrDefault(false)) return true
+        val head = file.inputStream().use { it.readNBytes(12) }
+        fun starts(vararg b: Int) = head.size >= b.size && b.indices.all { head[it] == b[it].toByte() }
+        return starts(0xFF, 0xD8, 0xFF) || starts(0x89, 0x50, 0x4E, 0x47) || (starts(0x52, 0x49, 0x46, 0x46) && head.size >= 12 && String(head, 8, 4) == "WEBP")
+    }
+
+    /** The first video stream (the attached picture) of an audio file, one frame, into `target`. False when ffmpeg is missing or finds none. */
+    private fun ffmpegArt(file: File, target: File): Boolean {
+        val process = try {
+            ProcessBuilder("ffmpeg", "-nostdin", "-v", "quiet", "-y", "-i", file.path, "-map", "0:v:0", "-frames:v", "1", "-f", "image2", target.path)
+                .redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+        } catch (e: Exception) { log.info("ffmpeg could not be started for covers: ${e.message}"); return false }
+        process.outputStream.close()
+        if (!process.waitFor(30, TimeUnit.SECONDS)) { process.destroyForcibly(); log.info("ffmpeg timed out reading the cover of ${file.name}"); return false }
+        return process.exitValue() == 0
+    }
+
+    /** The libraries ("ebook", "audiobook") that could not be read in the last pass, empty after a healthy one. */
+    @Volatile var unreadable: List<String> = emptyList()
+        private set
+    /** Readable libraries that list nothing although the catalog knows books from them (and no admin accepted that). */
+    @Volatile var emptied: List<String> = emptyList()
+        private set
+    /** Set while a pass was held back because it would have hidden a large share of the works at once: what to tell the admin. */
+    @Volatile var partial: String? = null
+        private set
+    val unreachable: List<String> get() = listOf("ebook", "audiobook").filter { it in unreadable || it in emptied }
+
+    /**
+     * An admin says an empty library is meant. Refused (false) for any library that was not found empty at the last pass, an unreadable one included.
+     * The library "partial" accepts a pass that was held back for hiding many works at once; it is stored the same way and ends after that pass.
+     */
+    fun acceptEmpty(library: String): Boolean {
+        if (library == PARTIAL) { if (partial == null) return false; catalog.setAcceptedEmpty(PARTIAL, true); return true }
+        if (library !in emptied) return false
+        catalog.setAcceptedEmpty(library, true)
+        return true
+    }
+
+    /** The same in plain words for the admin page. */
+    fun unreachableNotes(): List<String> = unreachable.map {
+        if (it in unreadable) "The $it folder could not be read at the last check. Nothing was removed."
+        else "The $it folder is empty, but the server knows ${if (it == "ebook") "ebooks" else "audiobooks"} from it. Nothing was removed."
+    } + listOfNotNull(partial)
+
+    /** A root counts as readable when it is a folder that can be listed (a null listing is an error, not an empty folder). */
+    private fun readable(root: File) = root.isDirectory && root.listFiles() != null
 
     /** True once a pass over both libraries has ended since the server started, whether it finished or failed: before that the counts are still growing. */
     @Volatile var scanned = false
@@ -105,7 +240,7 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
     internal data class PairingPlan(val matches: Map<String, EbookEntry>, val duplicates: Set<String>)
 
     internal fun pairingPlan(ebooks: List<EbookEntry>, audio: List<AudioEntry>): PairingPlan {
-        val existing = catalog.works().filter { it.hasAudio }.associateBy { it.audioDir }
+        val existing = catalog.worksIncludingMissing().filter { it.hasAudio }.associateBy { it.audioDir }
         val byPath = ebooks.associateBy { it.path.path }
         val chosen = LinkedHashMap<String, EbookEntry>()
         val blocked = HashSet<String>()
@@ -275,10 +410,12 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
         return EbookEntry(title, author, file, "epub", cover, meta)
     }
 
-    private fun calibreBooks(): List<EbookEntry> {
+    /** Null when Calibre's database could not be copied aside: the pass then treats the ebook folder as unreadable. */
+    private fun calibreBooks(): List<EbookEntry>? {
         val source = File(config.ebooks, "metadata.db")
         val copy = File(config.data, "calibre-metadata.db")
-        Files.copy(source.toPath(), copy.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        try { Files.copy(source.toPath(), copy.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+        catch (e: Exception) { log.warn("Could not copy Calibre's metadata.db: ${e.message}"); return null }
         val out = ArrayList<EbookEntry>()
         calibreStamp = source.lastModified() xor source.length()
         DriverManager.getConnection("jdbc:sqlite:${copy.path}").use { db ->
@@ -395,6 +532,13 @@ class Scanner(private val config: Config, private val catalog: Catalog) {
     }
 
     companion object {
+        /** How long a work whose files vanished is kept, hidden, before it is deleted. */
+        const val MISSING_GRACE_MS = 30L * 24 * 60 * 60 * 1000
+        /** The fewest works a pass must lose, and more than a quarter of those visible, before it is held back as a partly read library. */
+        private const val PARTIAL_MIN = 5
+        /** The name an admin's acceptance of such a pass is stored under (beside "ebook" and "audiobook" in accepted_empty). */
+        const val PARTIAL = "partial"
+
         /** Natural order: "Chapter 2" before "Chapter 10". */
         val naturalOrder = Comparator<File> { a, b -> compareNatural(a.name, b.name) }
 

@@ -43,4 +43,3 @@ The reader tests run against one ebook and its audiobook, which are not in the r
 
 Output goes to the ignored `test-results/` folder. Emulator numbers are not phone numbers. If a UI walkthrough is needed, the tap zones matter: with the reader controls hidden, a tap in the right quarter of the page turns it.
 
-The watch app is driven the same way on the Wear OS emulator (`Start-Emulator.ps1 -Watch`), against the local server and its two test audiobooks. `server\local\check_link.py` and `check_resume.jsh` check the server's side of Wear OS sign-in and the watch's resumable download without a device.

@@ -32,8 +32,7 @@ Your place lives on the server, one per person. Read on the phone, then open the
 ## The pieces
 
 - The Android app reads EPUBs in the publisher's layout, plays audiobooks, follows narration and keeps books for offline use. In a car it shows up in Android Auto with your shelf, recent books and series, and it answers "play … on Unison".
-- The web client is the same library, reader and player in a desktop browser. The server serves it; there's nothing extra to install.
-- The Wear OS app plays the audiobooks on your shelf from the watch itself, streamed or downloaded, over Wi-Fi or LTE. It's new and has had very little use on a real watch.
+- The web client is the same library, reader and player in a desktop browser. Books can be browsed as ebooks or as audiobooks, by author, series, narrator or genre. The server serves it; there's nothing extra to install.
 - The server is a Kotlin service with a SQLite database, run in Docker. Each person signs in and gets their own shelf, places, bookmarks, highlights and collections. An admin adds people, fixes pairings and corrects a wrong title or cover without touching the files.
 
 Two smaller things. People can ask for books the library doesn't have, and the request is marked as arrived when the book turns up. Reading and listening time is counted per person, with streaks and a one-page review of the year that you can save as a picture.
@@ -84,7 +83,7 @@ To build the image yourself instead, run `docker build -t unisonserver:local .` 
 
 ## Download
 
-The APKs are on the [Releases page](https://github.com/wandering-wampa/unison-reader/releases/latest): `UnisonReader-<version>.apk` for the phone and `UnisonReader-wear-<version>.apk` for a Wear OS watch. Open the file on the device, or run `adb install -r UnisonReader-<version>.apk` from a computer. Installing over an older version keeps your books and places. Each release lists the SHA-256 of both files.
+The APK is on the [Releases page](https://github.com/wandering-wampa/unison-reader/releases/latest): `UnisonReader-<version>.apk`. Open the file on the phone, or run `adb install -r UnisonReader-<version>.apk` from a computer. Installing over an older version keeps your books and places. Each release lists the SHA-256 of the file.
 
 ## Documentation
 

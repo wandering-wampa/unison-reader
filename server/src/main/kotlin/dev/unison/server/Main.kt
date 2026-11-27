@@ -119,5 +119,5 @@ fun main() {
 
 object Version {
     // Kept in step with the app's version at each release (it had stayed at 0.1.0 through nine phases).
-    const val NAME = "0.13.0"
+    const val NAME = "0.14.0"
 }

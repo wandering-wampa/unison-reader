@@ -24,6 +24,12 @@ class FormattedReader(
     var onLocation: (String, Double) -> Unit = { _, _ -> }
     /** The reader chose a sentence deliberately (long-press selection), as opposed to a page relocation. */
     var onChosen: (Int) -> Unit = {}
+    /** The selection menu's Highlight: the first and last sentence the selection touches. */
+    var onHighlight: (Int, Int) -> Unit = { _, _ -> }
+    /** The selection menu's Note: the first and last sentence the selection touches. */
+    var onNote: (Int, Int) -> Unit = { _, _ -> }
+    /** The selection menu's Listen (only in a book with audio): the first and last sentence the selection touches. */
+    var onListen: (Int, Int) -> Unit = { _, _ -> }
     /** When true, the page flows as one scrolled column regardless of the saved reading mode. */
     var scrollOverride = false
 
@@ -43,14 +49,37 @@ class FormattedReader(
         super.startActionMode(if (isCacheRenderer) callback else LookupMenu(callback), type)
 
     private inner class LookupMenu(private val inner: android.view.ActionMode.Callback) : android.view.ActionMode.Callback2() {
-        private val define = 0x55AA01; private val translate = 0x55AA02
+        private val define = 0x55AA01; private val translate = 0x55AA02; private val highlight = 0x55AA03; private val note = 0x55AA04; private val listen = 0x55AA05
         private fun add(menu: android.view.Menu) {
-            if (menu.findItem(define) == null) menu.add(android.view.Menu.NONE, define, 1, "Define").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
-            if (menu.findItem(translate) == null) menu.add(android.view.Menu.NONE, translate, 2, "Translate").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            if (menu.findItem(highlight) == null) menu.add(android.view.Menu.NONE, highlight, 0, "Highlight").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            if (menu.findItem(note) == null) menu.add(android.view.Menu.NONE, note, 1, "Note").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            if (book.tracks.isNotEmpty() && menu.findItem(listen) == null) menu.add(android.view.Menu.NONE, listen, 2, "Listen").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            if (menu.findItem(define) == null) menu.add(android.view.Menu.NONE, define, 3, "Define").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+            if (menu.findItem(translate) == null) menu.add(android.view.Menu.NONE, translate, 4, "Translate").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
         }
-        override fun onCreateActionMode(mode: android.view.ActionMode, menu: android.view.Menu) = inner.onCreateActionMode(mode, menu).also { if (it) add(menu) }
-        override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu) = inner.onPrepareActionMode(mode, menu).also { add(menu) }
+        /**
+         * The floating toolbar fills its first row in menu order and sends items marked NEVER to the overflow, so an app's
+         * items cannot jump ahead of the system's by order alone: the first row is Copy, Highlight, Note and Listen, and
+         * every other item (Share, Select all, Define, Translate, whatever the system adds) goes behind the arrow. Nothing is removed.
+         */
+        private fun arrange(menu: android.view.Menu) {
+            val items = (0 until menu.size()).map { menu.getItem(it) }
+            val ours = setOf(highlight, note, listen, define, translate)
+            val copy = items.firstOrNull { it.itemId == android.R.id.copy }
+                ?: items.firstOrNull { it.itemId !in ours && runCatching { resources.getResourceEntryName(it.itemId) }.getOrNull()?.contains("copy", ignoreCase = true) == true }
+                ?: items.firstOrNull { it.itemId !in ours }
+            for (item in items) {
+                if (item === copy) continue
+                if (item.itemId == highlight || item.itemId == note || item.itemId == listen) item.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_IF_ROOM)
+                else item.setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_NEVER)
+            }
+        }
+        override fun onCreateActionMode(mode: android.view.ActionMode, menu: android.view.Menu) = inner.onCreateActionMode(mode, menu).also { if (it) { add(menu); arrange(menu) } }
+        override fun onPrepareActionMode(mode: android.view.ActionMode, menu: android.view.Menu) = inner.onPrepareActionMode(mode, menu).also { add(menu); arrange(menu) }
         override fun onActionItemClicked(mode: android.view.ActionMode, item: android.view.MenuItem): Boolean {
+            if (item.itemId == highlight) { selectedSpan({ mode.finish() }, onHighlight); return true }
+            if (item.itemId == note) { selectedSpan({ mode.finish() }, onNote); return true }
+            if (item.itemId == listen) { selectedSpan({ mode.finish() }, onListen); return true }
             if (item.itemId != define && item.itemId != translate) return inner.onActionItemClicked(mode, item)
             // The menu closes (and the selection with it) only after the page has answered with the selected words.
             lookUp(item.itemId == translate) { mode.finish() }; return true
@@ -59,6 +88,14 @@ class FormattedReader(
         override fun onGetContentRect(mode: android.view.ActionMode, view: android.view.View, outRect: android.graphics.Rect) {
             (inner as? android.view.ActionMode.Callback2)?.onGetContentRect(mode, view, outRect) ?: super.onGetContentRect(mode, view, outRect)
         }
+    }
+
+    /** Closes the menu, then tells [then] the first and last sentence the selection touches. */
+    private fun selectedSpan(done: () -> Unit, then: (Int, Int) -> Unit) = evaluateJavascript("window.readerSelectionSpan()") { raw ->
+        val span = runCatching { JSONArray(raw) }.getOrNull()
+        done()
+        val first = span?.optInt(0, -1) ?: -1; val last = span?.optInt(1, -1) ?: -1
+        if (first >= 0 && last >= first) then(first, last)
     }
 
     private fun lookUp(translate: Boolean, done: () -> Unit) = evaluateJavascript("window.readerSelection()") { raw ->

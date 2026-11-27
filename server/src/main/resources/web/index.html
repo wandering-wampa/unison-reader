@@ -17,30 +17,29 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400&family=Inter:wght@400;500;600&display=swap">
-<link rel="stylesheet" href="/app.css?v=21">
+<link rel="stylesheet" href="/app.css?v=24">
 </head>
 <body>
 <header id="top" hidden>
   <a class="brand" href="#/shelf" aria-label="Unison shelf"><i class="mark"></i><span>Unison</span></a>
   <nav id="nav" aria-label="Library">
-    <a href="#/shelf" data-tab="shelf">Shelf</a>
-    <a href="#/books" data-tab="books">Books</a>
-    <a href="#/series" data-tab="series">Series</a>
-    <a href="#/authors" data-tab="authors">Authors</a>
-    <a href="#/narrators" data-tab="narrators">Narrators</a>
-    <a href="#/lists" data-tab="lists">Lists</a>
-    <a href="#/highlights" data-tab="highlights">Highlights</a>
-    <a href="#/stats" data-tab="stats">Stats</a>
-    <a href="#/admin" data-tab="admin" id="adminTab" hidden>Admin</a>
+    <a href="#/shelf" data-tab="shelf">My Shelf</a>
+    <a href="#/ebooks" data-tab="ebooks">eBooks</a>
+    <a href="#/audiobooks" data-tab="audiobooks">Audiobooks</a>
+    <a href="#/lists" data-tab="journal">Journal</a>
   </nav>
   <form id="searchForm" role="search"><input id="search" type="search" placeholder="Search titles, authors, series, narrators" aria-label="Search the library"></form>
   <a id="now" class="now" href="#" hidden title="Open the player"><i></i><b></b><span></span></a>
   <button id="theme" class="ghost icon" type="button" title="Light or dark" aria-label="Light or dark"></button>
-  <a id="who" class="ghost" href="#/account" title="Account"><i></i><span></span></a>
+  <div id="whoBox">
+    <a id="who" class="ghost" href="#/account" title="Account"><i></i><span></span></a>
+    <button id="whoBtn" class="ghost" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="whoMenu" hidden><i></i><span></span></button>
+    <div id="whoMenu" role="menu" aria-label="Account" hidden><a role="menuitem" href="#/account">Account</a><a role="menuitem" href="#/admin">Admin</a></div>
+  </div>
 </header>
 <main id="view" aria-live="polite"></main>
 <audio id="audio" preload="metadata"></audio>
 <div id="toast" hidden></div>
-<script src="/app.js?v=27"></script>
+<script src="/app.js?v=33"></script>
 </body>
 </html>

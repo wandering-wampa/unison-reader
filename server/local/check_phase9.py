@@ -182,4 +182,27 @@ if '--online' in sys.argv:
     s, v = call('PUT', f'/api/works/{typo}/meta', {'reset': ['cover']}, admin)
     ok('cover' not in v['current']['edited'] and not v['current']['cover'] and v['current']['coverVersion'] == 0, 'and reset')
     ok(call('GET', f'/api/works/{typo}/meta/lookup', token=reader)[0] == 400, 'lookups are the admin\'s')
+# ---- unknown paths: /api answers 404 in JSON when signed in and 401 when not; the page and its files are served, other paths are 404
+for m in ('GET', 'POST', 'PUT', 'DELETE'):
+    for path in ('/api/no-such-route-xyz', '/api/link/start', '/api/me/link/123456'):
+        body = {} if m in ('POST', 'PUT') else None
+        s, v = call(m, path, body, admin)
+        ok(s == 404 and isinstance(v, dict) and v.get('message'), f'{m} {path} signed in is a 404 with a JSON message (got {s})')
+        ok(call(m, path, body)[0] == 401, f'{m} {path} signed out is a 401')
+import re
+def raw(path):
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=30) as r: return r.status, r.headers, r.read().decode('utf-8', 'replace')
+    except urllib.error.HTTPError as e: return e.code, e.headers, e.read().decode('utf-8', 'replace')
+s, h, page = raw('/')
+ok(s == 200 and h['Content-Type'].startswith('text/html') and h['Cache-Control'] == 'no-cache', '/ is the page, text/html, no-cache')
+ok(raw('/index.html')[0] == 200, '/index.html is the page')
+refs = re.findall(r'<script[^>]+src="(/[^"]+)"', page) + re.findall(r'<link[^>]+rel="stylesheet"[^>]+href="(/[^"]+)"', page)
+ok(len(refs) >= 2, 'the page references a script and a stylesheet')
+for ref in refs:
+    kind = 'javascript' if ref.split('?')[0].endswith('.js') else 'css'
+    s, h, _ = raw(ref)
+    ok(s == 200 and kind in h['Content-Type'], f'{ref} is served as {kind} (got {s} {h["Content-Type"]})')
+for path in ('/no-such-page', '/book/abc', '/missing.js'):
+    ok(raw(path)[0] == 404, f'{path} is a 404, not the page')
 print(f'PASS ({checks[0]} checks)')

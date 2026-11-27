@@ -410,53 +410,53 @@ class ReadingState(context: Context) {
     var active: String
         get() = prefs.getString("active", "").orEmpty()
         set(v) {
-            prefs.edit().putString("active", v).commit()
+            prefs.edit().putString("active", v).apply()
         }
 
     var tree: String
         get() = prefs.getString("tree", "").orEmpty()
         set(v) {
-            prefs.edit().putString("tree", v).commit()
+            prefs.edit().putString("tree", v).apply()
         }
 
     var font: Int
         get() = prefs.getInt("font", 22)
         set(v) {
-            prefs.edit().putInt("font", v.coerceIn(14, 40)).commit()
+            prefs.edit().putInt("font", v.coerceIn(14, 40)).apply()
         }
 
     /** The app's own light or dark: "system" (follow the phone), "light" or "dark". The reader's paper is separate. */
     var appTheme: String
         get() = prefs.getString("appTheme", "system")!!
         set(v) {
-            prefs.edit().putString("appTheme", v).commit()
+            prefs.edit().putString("appTheme", v).apply()
         }
 
     var theme: String
         get() = prefs.getString("theme", "system")!!
         set(v) {
-            prefs.edit().putString("theme", v).commit()
+            prefs.edit().putString("theme", v).apply()
         }
 
     var serif: Boolean
         get() = prefs.getBoolean("serif", true)
         set(v) {
-            prefs.edit().putBoolean("serif", v).commit()
+            prefs.edit().putBoolean("serif", v).apply()
         }
 
     /** The last speed chosen anywhere: where a book never given its own speed starts. */
     var speed: Float
         get() = prefs.getFloat("speed", 1f)
         set(v) {
-            prefs.edit().putFloat("speed", v).commit()
+            prefs.edit().putFloat("speed", v).apply()
         }
 
     /** This book's speed: its own, or the last speed chosen. */
     fun speed(id: String): Float = prefs.getFloat("$id.speed", speed)
     /** `local`: chosen on this device and not yet sent to the server. */
-    fun speed(id: String, v: Float, local: Boolean) { prefs.edit().putFloat("$id.speed", v).putBoolean("$id.speedUnsent", local).apply { if (local) putFloat("speed", v) }.commit() }
+    fun speed(id: String, v: Float, local: Boolean) { prefs.edit().putFloat("$id.speed", v).putBoolean("$id.speedUnsent", local).apply { if (local) putFloat("speed", v) }.apply() }
     fun speedUnsent(id: String) = prefs.getBoolean("$id.speedUnsent", false)
-    fun speedSent(id: String) { prefs.edit().putBoolean("$id.speedUnsent", false).commit() }
+    fun speedSent(id: String) { prefs.edit().putBoolean("$id.speedUnsent", false).apply() }
 
     var typeface: String
         get() = prefs.getString("typeface", if (serif) "literata" else "sans")!!
@@ -519,12 +519,12 @@ class ReadingState(context: Context) {
         val a = marks(id); val out = JSONArray()
         for (i in 0 until a.length()) { val m = a.getJSONObject(i); if (!(m.getInt("passage") == passage && m.getString("kind") == kind)) out.put(m) }
         out.put(JSONObject().put("passage", passage).put("kind", kind).put("note", note).put("text", text.take(600)).put("created", created))
-        prefs.edit().putString("$id.marks", out.toString()).commit()
+        prefs.edit().putString("$id.marks", out.toString()).apply()
     }
     fun removeMark(id: String, passage: Int, kind: String) {
         val a = marks(id); val out = JSONArray()
         for (i in 0 until a.length()) { val m = a.getJSONObject(i); if (!(m.getInt("passage") == passage && m.getString("kind") == kind)) out.put(m) }
-        prefs.edit().putString("$id.marks", out.toString()).commit()
+        prefs.edit().putString("$id.marks", out.toString()).apply()
     }
     /** Listening and reading sessions recorded on this device and not yet sent to the server. */
     /**
@@ -540,13 +540,13 @@ class ReadingState(context: Context) {
     fun shelfOwed(id: String, owed: Boolean) {
         synchronized(ReadingState::class.java) {
             val now = HashSet(prefs.getStringSet("shelfOwed", emptySet()) ?: emptySet())
-            if (if (owed) now.add(id) else now.remove(id)) prefs.edit().putStringSet("shelfOwed", now).commit()
+            if (if (owed) now.add(id) else now.remove(id)) prefs.edit().putStringSet("shelfOwed", now).apply()
         }
     }
 
     var shelfOwedSeeded: Boolean
         get() = prefs.getBoolean("shelfOwedSeeded", false)
-        set(v) { prefs.edit().putBoolean("shelfOwedSeeded", v).commit() }
+        set(v) { prefs.edit().putBoolean("shelfOwedSeeded", v).apply() }
 
     /** Who last signed in on this device, as "server|name": a sign-in by the same person keeps what the device holds. */
     var lastAccount: String
@@ -580,7 +580,7 @@ class ReadingState(context: Context) {
             a.put(JSONObject().put("work", work).put("kind", kind).put("started", started).put("ended", ended).put("sentences", sentences).put("pages", pages))
             // A long offline stretch keeps at most a few hundred; the oldest go first.
             while (a.length() > 400) a.remove(0)
-            prefs.edit().putString("sessions", a.toString()).commit()
+            prefs.edit().putString("sessions", a.toString()).apply()
         }
     }
     /** Takes exactly the sessions that were sent out of the queue; ones queued meanwhile stay. */
@@ -589,7 +589,7 @@ class ReadingState(context: Context) {
             val gone = HashSet<String>(); for (i in 0 until sent.length()) gone.add(sent.get(i).toString())
             val a = pendingSessions(); val rest = JSONArray()
             for (i in 0 until a.length()) if (!gone.remove(a.get(i).toString())) rest.put(a.get(i))
-            prefs.edit().putString("sessions", rest.toString()).commit()
+            prefs.edit().putString("sessions", rest.toString()).apply()
         }
     }
 
@@ -600,18 +600,18 @@ class ReadingState(context: Context) {
             val now = HashSet(prefs.getStringSet("marksOwed", emptySet()) ?: emptySet())
             now.remove("$id|$passage|$kind|put"); now.remove("$id|$passage|$kind|del")
             now.add("$id|$passage|$kind|" + if (remove) "del" else "put")
-            prefs.edit().putStringSet("marksOwed", now).commit()
+            prefs.edit().putStringSet("marksOwed", now).apply()
         }
     }
     fun markSettled(entry: String) {
         synchronized(ReadingState::class.java) {
             val now = HashSet(prefs.getStringSet("marksOwed", emptySet()) ?: emptySet())
-            if (now.remove(entry)) prefs.edit().putStringSet("marksOwed", now).commit()
+            if (now.remove(entry)) prefs.edit().putStringSet("marksOwed", now).apply()
         }
     }
     /** True once this book's marks have been compared with the server's under the owed record (see Server.pullMarks). */
     fun marksSeeded(id: String) = prefs.getBoolean("$id.marksSeeded", false)
-    fun marksSeeded(id: String, v: Boolean) { prefs.edit().putBoolean("$id.marksSeeded", v).commit() }
+    fun marksSeeded(id: String, v: Boolean) { prefs.edit().putBoolean("$id.marksSeeded", v).apply() }
     var serverUser: String
         get() = prefs.getString("serverUser", "").orEmpty()
         set(v) { prefs.edit().putString("serverUser", v).commit() }
@@ -623,43 +623,50 @@ class ReadingState(context: Context) {
         get() = prefs.getBoolean("standalone", false)
         set(v) { prefs.edit().putBoolean("standalone", v).commit() }
     val deviceId: String
-        get() = prefs.getString("deviceId", null) ?: (android.os.Build.MODEL.replace(Regex("[^A-Za-z0-9]"), "") + "-" + java.util.UUID.randomUUID().toString().take(8)).also { prefs.edit().putString("deviceId", it).commit() }
+        get() = prefs.getString("deviceId", null) ?: (android.os.Build.MODEL.replace(Regex("[^A-Za-z0-9]"), "") + "-" + java.util.UUID.randomUUID().toString().take(8)).also { prefs.edit().putString("deviceId", it).apply() }
 
     /** Which server work a local book came from, and whether its audio was downloaded (else streamed). */
     fun serverWork(id: String): String? = prefs.getString("$id.serverWork", null)
     fun serverDownloaded(id: String) = prefs.getBoolean("$id.serverDownloaded", false)
     /** True for a book added while the server was still matching its text to its audio: what it has matched since is fetched until it is done. */
     fun syncPending(id: String) = prefs.getBoolean("$id.syncPending", false)
-    fun syncPending(id: String, v: Boolean) { prefs.edit().putBoolean("$id.syncPending", v).commit() }
+    fun syncPending(id: String, v: Boolean) { prefs.edit().putBoolean("$id.syncPending", v).apply() }
     /** The server's status text when it gave up matching this book's text to its audio ("Failed: ..."); blank otherwise. */
     fun syncFailed(id: String): String = prefs.getString("$id.syncFailed", "").orEmpty()
-    fun syncFailed(id: String, v: String) { prefs.edit().putString("$id.syncFailed", v).commit() }
+    fun syncFailed(id: String, v: String) { prefs.edit().putString("$id.syncFailed", v).apply() }
     /** The version of the server's cover this device keeps for a book (0: the library's own; otherwise when an admin chose it). */
     fun coverVersion(id: String): Long = prefs.getLong("$id.coverVersion", 0)
-    fun coverVersion(id: String, v: Long) { prefs.edit().putLong("$id.coverVersion", v).commit() }
-    fun setServerWork(id: String, work: String, downloaded: Boolean) { prefs.edit().putString("$id.serverWork", work).putBoolean("$id.serverDownloaded", downloaded).commit() }
+    fun coverVersion(id: String, v: Long) { prefs.edit().putLong("$id.coverVersion", v).apply() }
+    fun setServerWork(id: String, work: String, downloaded: Boolean) { prefs.edit().putString("$id.serverWork", work).putBoolean("$id.serverDownloaded", downloaded).apply() }
     /** Position bookkeeping for the server: the pair last sent, and the server's timestamp last seen. */
     fun pushed(id: String): String = prefs.getString("$id.pushed", "").orEmpty()
     fun serverUpdated(id: String): Long = prefs.getLong("$id.serverUpdated", 0)
-    fun markPushed(id: String, passage: Int, audio: Long, updated: Long) { prefs.edit().putString("$id.pushed", "$passage:$audio").putLong("$id.serverUpdated", updated).commit() }
+    fun markPushed(id: String, passage: Int, audio: Long, updated: Long) { prefs.edit().putString("$id.pushed", "$passage:$audio").putLong("$id.serverUpdated", updated).apply() }
     /** My shelf: the books this person is reading or means to read next, in the order added. Per device until accounts exist. */
     fun shelf(): List<String> = runCatching { JSONArray(prefs.getString("shelf", "[]")).let { a -> List(a.length()) { a.getString(it) } } }.getOrDefault(emptyList())
     fun onShelf(id: String) = id in shelf()
-    fun addToShelf(id: String) { if (!onShelf(id)) prefs.edit().putString("shelf", JSONArray(shelf() + id).toString()).putLong("$id.shelved", System.currentTimeMillis()).commit() }
-    fun removeFromShelf(id: String) { prefs.edit().putString("shelf", JSONArray(shelf().filter { it != id }).toString()).commit() }
+    fun addToShelf(id: String) { if (!onShelf(id)) prefs.edit().putString("shelf", JSONArray(shelf() + id).toString()).putLong("$id.shelved", System.currentTimeMillis()).apply() }
+    fun removeFromShelf(id: String) { prefs.edit().putString("shelf", JSONArray(shelf().filter { it != id }).toString()).apply() }
     fun shelvedAt(id: String): Long = prefs.getLong("$id.shelved", 0)
+    /** The bottom-bar screen showing: "shelf" (Home), "ebooks" or "audio". Anything else a past version stored reads as Home. */
     var libraryTab: String
-        get() = prefs.getString("libraryTab", "shelf")!!
+        get() = prefs.getString("libraryTab", "shelf")!!.takeIf { it == "ebooks" || it == "audio" } ?: "shelf"
         set(v) { prefs.edit().putString("libraryTab", v).apply() }
-    /** The Library category last browsed (books, series, authors, narrators): where the Library button returns to. */
-    var libraryBrowse: String
-        get() = prefs.getString("libraryBrowse", "books")!!
-        set(v) { prefs.edit().putString("libraryBrowse", v).apply() }
+    /** The sub-view each section was left on (all, authors, narrators, series, genres): where its tab returns to. Unknown or unavailable values read as "all". */
+    fun subView(format: String): String {
+        val v = prefs.getString("subView.$format", "all")!!
+        return if (v in setOf("all", "authors", "series", "genres") || (v == "narrators" && format == "audio")) v else "all"
+    }
+    fun subView(format: String, v: String) { prefs.edit().putString("subView.$format", v).apply() }
+    /** The format ("ebook" or "audio") last browsed: where a person, series or genre opened from a book's page or a search lands. */
+    var lastFormat: String
+        get() = prefs.getString("lastFormat", "ebook")!!.takeIf { it == "audio" } ?: "ebook"
+        set(v) { prefs.edit().putString("lastFormat", v).apply() }
     /** When the book was marked finished (epoch ms), or 0. */
     fun finished(id: String): Long = prefs.getLong("$id.finished", 0)
-    fun setFinished(id: String, at: Long) { prefs.edit().putLong("$id.finished", at).commit() }
+    fun setFinished(id: String, at: Long) { prefs.edit().putLong("$id.finished", at).apply() }
     /** Sets both halves of the position without touching follow (a position taken from the server). */
-    fun position(id: String, passage: Int, audio: Long) { prefs.edit().putInt("$id.passage", passage).putLong("$id.audio", audio).commit() }
+    fun position(id: String, passage: Int, audio: Long) { prefs.edit().putInt("$id.passage", passage).putLong("$id.audio", audio).apply() }
 
     fun passage(id: String) = prefs.getInt("$id.passage", 0)
 
@@ -682,11 +689,11 @@ class ReadingState(context: Context) {
     fun follow(id: String) = prefs.getBoolean("$id.follow", true)
 
     fun select(id: String, p: Int) {
-        prefs.edit().putInt("$id.passage", p).putBoolean("$id.follow", false).commit()
+        prefs.edit().putInt("$id.passage", p).putBoolean("$id.follow", false).apply()
     }
 
     fun follow(id: String, v: Boolean) {
-        prefs.edit().putBoolean("$id.follow", v).commit()
+        prefs.edit().putBoolean("$id.follow", v).apply()
     }
 
     fun audio(id: String, time: Long, p: Int?) {

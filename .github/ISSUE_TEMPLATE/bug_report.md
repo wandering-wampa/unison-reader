@@ -8,7 +8,7 @@ What happened, and what you expected instead:
 
 Steps to reproduce:
 
-Which part (server, web client, Android app, Wear OS app):
+Which part (server, web client, Android app):
 
 Version. The server's is on the Admin page and in the `/api/health` response; the app's is at the bottom of Settings:
 

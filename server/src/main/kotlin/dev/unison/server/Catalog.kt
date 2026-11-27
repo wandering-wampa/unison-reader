@@ -60,6 +60,7 @@ data class Work(
 @Serializable data class SeriesProgress(val name: String, val total: Int, val finished: Int, val current: String?, val next: String?, val lastFinished: Long)
 @Serializable data class SeriesSummary(val name: String, val works: Int, val ready: Int, val duration: Long, val authors: List<String>, val cover: String?)
 @Serializable data class PersonSummary(val name: String, val works: Int, val ready: Int)
+@Serializable data class GenreSummary(val name: String, val works: Int, val main: Boolean)
 /** Metadata about a work from one source; blank or null means "nothing from this source". */
 class Meta(
     val subtitle: String? = null, val description: String? = null, val publishedYear: String? = null, val publisher: String? = null,
@@ -104,8 +105,10 @@ class Catalog(file: File) {
             // An audiobook the admin decided has no ebook to pair with: it stops counting as half a book.
             s.execute("CREATE TABLE IF NOT EXISTS audio_only (title_key TEXT NOT NULL, author_key TEXT NOT NULL, decided INTEGER NOT NULL, PRIMARY KEY (title_key, author_key))")
             // Richer metadata (added after the first release): columns are added to existing catalogs.
-            for (column in listOf("subtitle TEXT NOT NULL DEFAULT ''", "description TEXT NOT NULL DEFAULT ''", "published_year TEXT NOT NULL DEFAULT ''", "publisher TEXT NOT NULL DEFAULT ''", "language TEXT NOT NULL DEFAULT ''", "rating REAL NOT NULL DEFAULT 0", "genres TEXT NOT NULL DEFAULT ''", "meta_source INTEGER NOT NULL DEFAULT 0", "series_source INTEGER NOT NULL DEFAULT 0"))
+            for (column in listOf("subtitle TEXT NOT NULL DEFAULT ''", "description TEXT NOT NULL DEFAULT ''", "published_year TEXT NOT NULL DEFAULT ''", "publisher TEXT NOT NULL DEFAULT ''", "language TEXT NOT NULL DEFAULT ''", "rating REAL NOT NULL DEFAULT 0", "genres TEXT NOT NULL DEFAULT ''", "meta_source INTEGER NOT NULL DEFAULT 0", "series_source INTEGER NOT NULL DEFAULT 0", "missing_since INTEGER", "cover_checked INTEGER NOT NULL DEFAULT 0"))
                 runCatching { s.execute("ALTER TABLE works ADD COLUMN $column") }
+            // A library an admin accepted as empty on purpose (cleared when it lists something again).
+            s.execute("CREATE TABLE IF NOT EXISTS accepted_empty (library TEXT PRIMARY KEY)")
             s.execute("CREATE TABLE IF NOT EXISTS work_series (work TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE, series TEXT NOT NULL, sequence REAL, PRIMARY KEY (work, series))")
             s.execute("CREATE INDEX IF NOT EXISTS work_series_name ON work_series (series)")
             s.execute("CREATE TABLE IF NOT EXISTS work_people (work TEXT NOT NULL REFERENCES works(id) ON DELETE CASCADE, role TEXT NOT NULL, idx INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY (work, role, idx))")
@@ -158,14 +161,18 @@ class Catalog(file: File) {
     /** Attaches series and people to works in two queries, however many works there are, then lays the overlay on top. */
     private fun decorate(works: List<Work>, overlay: Boolean = true): List<Work> {
         if (works.isEmpty()) return works
+        // A small set reads only its own rows; the whole catalogue reads each table once.
+        val ids = if (works.size <= SCOPED_MAX) works.map { it.id }.toTypedArray() else null
+        fun only(column: String, prefix: String = " WHERE ") = if (ids == null) "" else "$prefix$column IN (${ids.joinToString(",") { "?" }})"
+        val scope = ids ?: emptyArray()
         val series = HashMap<String, MutableList<SeriesRef>>()
-        query("SELECT work, series, sequence FROM work_series ORDER BY series") { r -> series.getOrPut(r.getString(1)) { ArrayList() }.add(SeriesRef(r.getString(2), r.getObject(3)?.let { (it as Number).toDouble() })) }
+        query("SELECT work, series, sequence FROM work_series${only("work")} ORDER BY series", *scope) { r -> series.getOrPut(r.getString(1)) { ArrayList() }.add(SeriesRef(r.getString(2), r.getObject(3)?.let { (it as Number).toDouble() })) }
         val people = HashMap<Pair<String, String>, MutableList<String>>()
-        query("SELECT work, role, name FROM work_people ORDER BY idx") { r -> people.getOrPut(r.getString(1) to r.getString(2)) { ArrayList() }.add(r.getString(3)) }
-        val audioOnly = query("SELECT w.id FROM works w JOIN audio_only a ON a.title_key = w.title_key AND a.author_key = w.author_key") { it.getString(1) }.toSet()
+        query("SELECT work, role, name FROM work_people${only("work")} ORDER BY idx", *scope) { r -> people.getOrPut(r.getString(1) to r.getString(2)) { ArrayList() }.add(r.getString(3)) }
+        val audioOnly = query("SELECT w.id FROM works w JOIN audio_only a ON a.title_key = w.title_key AND a.author_key = w.author_key${only("w.id")}", *scope) { it.getString(1) }.toSet()
         val overrides = HashMap<String, MutableMap<String, String>>()
         val coverVersions = HashMap<String, Long>()
-        if (overlay) query("SELECT work, field, value, updated FROM overrides") { r -> overrides.getOrPut(r.getString(1)) { HashMap() }[r.getString(2)] = r.getString(3); if (r.getString(2) == "cover") coverVersions[r.getString(1)] = r.getLong(4) }
+        if (overlay) query("SELECT work, field, value, updated FROM overrides${only("work")}", *scope) { r -> overrides.getOrPut(r.getString(1)) { HashMap() }[r.getString(2)] = r.getString(3); if (r.getString(2) == "cover") coverVersions[r.getString(1)] = r.getLong(4) }
         return works.map { w ->
             val authors = people[w.id to "author"] ?: listOfNotNull(w.author.takeIf { it.isNotBlank() })
             val narrators = people[w.id to "narrator"] ?: listOfNotNull(w.narrator.takeIf { it.isNotBlank() })
@@ -188,10 +195,47 @@ class Catalog(file: File) {
         )
     }
 
-    fun works(): List<Work> = decorate(query("SELECT $workColumns FROM works w ORDER BY author, title") { work(it) }).let { all -> if (all.any { "authors" in it.edited || "title" in it.edited }) all.sortedWith(compareBy<Work> { it.author }.thenBy { it.title }) else all }
-    fun work(id: String): Work? = decorate(query("SELECT $workColumns FROM works w WHERE id = ?", id) { work(it) }).firstOrNull()
+    private fun worksQuery(includeMissing: Boolean) = decorate(query("SELECT $workColumns FROM works w ${if (includeMissing) "" else "WHERE w.missing_since IS NULL "}ORDER BY author, title") { work(it) })
+        .let { all -> if (all.any { "authors" in it.edited || "title" in it.edited }) all.sortedWith(compareBy<Work> { it.author }.thenBy { it.title }) else all }
+
+    /** The works clients may see: one whose files vanished is hidden (see [markMissing]) as if it were deleted. */
+    fun works(): List<Work> = worksQuery(false)
+    /** The visible works among `ids` (as [work] would answer for each), in one call: scoped queries for a small set, the whole catalogue otherwise. */
+    fun worksByIds(ids: kotlin.collections.Collection<String>): List<Work> {
+        val wanted = ids.toSet()
+        if (wanted.isEmpty()) return emptyList()
+        if (wanted.size > SCOPED_MAX) return works().filter { it.id in wanted }
+        return decorate(query("SELECT $workColumns FROM works w WHERE w.id IN (${wanted.joinToString(",") { "?" }}) AND w.missing_since IS NULL", *wanted.toTypedArray()) { work(it) })
+    }
+    fun work(id: String): Work? = decorate(query("SELECT $workColumns FROM works w WHERE id = ? AND w.missing_since IS NULL", id) { work(it) }).firstOrNull()
+    /** For the scanner only: hidden works included, so a returning work is found as it was left. */
+    fun worksIncludingMissing(): List<Work> = worksQuery(true)
+    fun workIncludingMissing(id: String): Work? = decorate(query("SELECT $workColumns FROM works w WHERE id = ?", id) { work(it) }).firstOrNull()
     /** The work as the libraries describe it, without the overlay. */
-    fun sourceWork(id: String): Work? = decorate(query("SELECT $workColumns FROM works w WHERE id = ?", id) { work(it) }, overlay = false).firstOrNull()
+    fun sourceWork(id: String): Work? = decorate(query("SELECT $workColumns FROM works w WHERE id = ? AND w.missing_since IS NULL", id) { work(it) }, overlay = false).firstOrNull()
+
+    /** When the work's files were first not found (milliseconds), null while it is present. */
+    fun missingSince(id: String): Long? = query("SELECT missing_since FROM works WHERE id = ?", id) { r -> r.getLong(1).takeUnless { r.wasNull() } }.firstOrNull()
+    /** Hides a work whose files are gone without deleting anything; [upsertWork] brings it back. */
+    fun markMissing(id: String, now: Long) { exec("UPDATE works SET missing_since = ? WHERE id = ? AND missing_since IS NULL", now, id) }
+    fun acceptedEmpty(library: String): Boolean = query("SELECT 1 FROM accepted_empty WHERE library = ?", library) { 1 }.isNotEmpty()
+    fun setAcceptedEmpty(library: String, on: Boolean) { if (on) exec("INSERT OR IGNORE INTO accepted_empty (library) VALUES (?)", library) else exec("DELETE FROM accepted_empty WHERE library = ?", library) }
+    /** How many works, hidden ones included, have an ebook (or an audiobook) on record. */
+    fun countWithEbook(): Int = query("SELECT COUNT(*) FROM works WHERE ebook_path IS NOT NULL") { it.getInt(1) }.first()
+    /** How many works are visible (not hidden as missing). */
+    fun countPresent(): Int = query("SELECT COUNT(*) FROM works WHERE missing_since IS NULL") { it.getInt(1) }.first()
+    /**
+     * The counts /api/health reports over the visible works: all, ready, preparing, missing. The CASE repeats [Work.shelf]
+     * (ebook and audio and status Synced, or audio and audio-only, is ready; ebook and audio otherwise preparing), so
+     * keep the two in step; the test compares them.
+     */
+    fun shelfCounts(): List<Int> = query(
+        "SELECT COUNT(*), " +
+            "COALESCE(SUM(CASE WHEN ebook_path IS NOT NULL AND audio_dir IS NOT NULL THEN status = 'Synced' WHEN audio_dir IS NOT NULL AND $AUDIO_ONLY THEN 1 ELSE 0 END), 0), " +
+            "COALESCE(SUM(CASE WHEN ebook_path IS NOT NULL AND audio_dir IS NOT NULL AND status <> 'Synced' THEN 1 ELSE 0 END), 0) " +
+            "FROM works w WHERE missing_since IS NULL"
+    ) { r -> val total = r.getInt(1); val ready = r.getInt(2); val preparing = r.getInt(3); listOf(total, ready, preparing, total - ready - preparing) }.first()
+    fun countWithAudio(): Int = query("SELECT COUNT(*) FROM works WHERE audio_dir IS NOT NULL") { it.getInt(1) }.first()
 
     /**
      * Lays an admin's corrections over a work. `changes`: field to its new value, lists joined by [SEP] and series
@@ -259,8 +303,8 @@ class Catalog(file: File) {
     }
 
     /** Every series with its size, how many of its works are synced, total audio, authors, and a cover work id. */
-    fun series(): List<SeriesSummary> {
-        val all = works()
+    fun series(format: String? = null): List<SeriesSummary> {
+        val all = worksIn(format)
         val byId = all.associateBy { it.id }
         val groups = HashMap<String, MutableList<Pair<Work, Double?>>>()
         for (w in all) for (sr in w.series) groups.getOrPut(sr.name) { ArrayList() }.add(w to sr.sequence)
@@ -296,21 +340,60 @@ class Catalog(file: File) {
         }.sortedByDescending { it.lastFinished }
     }
 
-    fun seriesWorks(name: String): List<Work> {
+    fun seriesWorks(name: String, format: String? = null): List<Work> {
         fun seq(w: Work) = w.series.firstOrNull { it.name.equals(name, ignoreCase = true) }
-        return works().filter { seq(it) != null }.sortedWith(compareBy<Work, Double?>(nullsLast()) { seq(it)?.sequence }.thenBy { it.title })
+        return worksIn(format).filter { seq(it) != null }.sortedWith(compareBy<Work, Double?>(nullsLast()) { seq(it)?.sequence }.thenBy { it.title })
     }
 
-    fun people(role: String): List<PersonSummary> {
-        val all = works()
+    fun people(role: String, format: String? = null): List<PersonSummary> {
+        val all = worksIn(format)
         val groups = HashMap<String, MutableList<Work>>()
         for (w in all) for (n in (if (role == "narrator") w.narrators else w.authors)) groups.getOrPut(n) { ArrayList() }.add(w)
         return groups.entries.map { (name, ws) -> PersonSummary(name, ws.size, ws.count { it.shelf == "ready" }) }.sortedBy { it.name.substringAfterLast(' ').lowercase() + " " + it.name.lowercase() }
     }
 
-    fun personWorks(role: String, name: String): List<Work> =
-        works().filter { w -> (if (role == "narrator") w.narrators else w.authors).any { it.equals(name, ignoreCase = true) } }
+    fun personWorks(role: String, name: String, format: String? = null): List<Work> =
+        worksIn(format).filter { w -> (if (role == "narrator") w.narrators else w.authors).any { it.equals(name, ignoreCase = true) } }
             .sortedWith(compareBy<Work> { it.series.firstOrNull()?.name?.lowercase() ?: "\uffff" }.thenBy<Work, Double?>(nullsLast()) { it.series.firstOrNull()?.sequence }.thenBy { it.title.lowercase() })
+
+    /** The visible works in a format: "ebook" (has an ebook), "audio" (has an audiobook), null for all. A work with both is in both. */
+    fun worksIn(format: String?): List<Work> = inFormat(works(), format)
+    private fun inFormat(all: List<Work>, format: String?): List<Work> = when (format) {
+        null -> all
+        "ebook" -> all.filter { it.hasEbook }
+        "audio" -> all.filter { it.hasAudio }
+        else -> throw IllegalArgumentException("format must be ebook or audio")
+    }
+
+    /** Every genre with at least one work in the format; see [genreKey] for what counts as one genre and [genreNames] for its name. */
+    fun genres(format: String? = null): List<GenreSummary> {
+        val visible = works()
+        val names = genreNames(visible)
+        val counts = HashMap<String, Int>()
+        for (w in inFormat(visible, format)) for (k in w.genres.mapNotNull { genreKey(it) }.toSet()) counts[k] = (counts[k] ?: 0) + 1
+        val main = counts.values.count { it >= 5 }.let { reaching -> { n: Int -> reaching < 12 || n >= 5 } }
+        return counts.map { (k, n) -> GenreSummary(names.getValue(k), n, main(n)) }.sortedWith(compareByDescending<GenreSummary> { it.works }.thenBy { it.name })
+    }
+
+    /** The works in the format with any spelling of the genre `name` (same [genreKey]), by author, first series, sequence, title. */
+    fun genreWorks(name: String, format: String? = null): List<Work> {
+        val inFormat = worksIn(format)
+        val key = genreKey(name) ?: return emptyList()
+        return inFormat.filter { w -> w.genres.any { genreKey(it) == key } }
+            .sortedWith(compareBy<Work> { it.author.lowercase() }.thenBy { it.series.firstOrNull()?.name?.lowercase() ?: "\uffff" }
+                .thenBy<Work, Double?>(nullsLast()) { it.series.firstOrNull()?.sequence }.thenBy { it.title.lowercase() })
+    }
+
+    /** Genre key to display name: the most frequent spelling over `all`; ties to one with an uppercase letter, then alphabetical. */
+    private fun genreNames(all: List<Work>): Map<String, String> {
+        val spellings = HashMap<String, HashMap<String, Int>>()
+        for (w in all) for (g in w.genres.map { it.trim() }.toSet()) { val k = genreKey(g) ?: continue; spellings.getOrPut(k) { HashMap() }.merge(g, 1, Int::plus) }
+        return spellings.mapValues { (_, m) ->
+            val best = m.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenByDescending { e -> e.key.any(Char::isUpperCase) }.thenBy { it.key }).first().key
+            if (best.any(Char::isUpperCase)) best
+            else best.replace('-', ' ').replace('_', ' ').split(' ').filter { it.isNotEmpty() }.joinToString(" ") { w -> w.replaceFirstChar { it.uppercase() } }
+        }
+    }
 
     /** Search over title, subtitle, authors, narrators and series; empty query returns everything. */
     fun search(q: String): List<Work> {
@@ -325,6 +408,13 @@ class Catalog(file: File) {
     /** The cover an admin chose in the overlay, else the library's. */
     fun coverPath(id: String): String? = query("SELECT value FROM overrides WHERE work = ? AND field = 'cover'", id) { it.getString(1) }.firstOrNull()?.takeIf { File(it).isFile }
         ?: query("SELECT cover_path FROM works WHERE id = ?", id) { it.getString(1) }.firstOrNull()
+    /** The library's own cover path for the work (ebook or audiobook), ignoring the admin's overlay. */
+    fun libraryCover(id: String): String? = query("SELECT cover_path FROM works WHERE id = ?", id) { it.getString(1) }.firstOrNull()
+    /** The audio stamp for which art embedded in the audio files was last looked for (0: never). */
+    fun coverChecked(id: String): Long = query("SELECT cover_checked FROM works WHERE id = ?", id) { it.getLong(1) }.firstOrNull() ?: 0
+    fun setCoverChecked(id: String, stamp: Long) { exec("UPDATE works SET cover_checked = ? WHERE id = ?", stamp, id) }
+    /** Gives the work a cover the scanner found for its audiobook; `updated` moves so clients that list works see the change. */
+    fun setCover(id: String, path: String) { exec("UPDATE works SET cover_path = ?, updated = ? WHERE id = ?", path, System.currentTimeMillis(), id) }
     fun stamps(id: String): Pair<Long, Long>? = query("SELECT ebook_stamp, audio_stamp FROM works WHERE id = ?", id) { it.getLong(1) to it.getLong(2) }.firstOrNull()
     fun alignmentVersion(id: String): Int = query("SELECT alignment_version FROM works WHERE id = ?", id) { it.getInt(1) }.firstOrNull() ?: 0
     fun byKeys(titleKey: String, authorKey: String): String? = query("SELECT id FROM works WHERE title_key = ? AND author_key = ?", titleKey, authorKey) { it.getString(1) }.firstOrNull()
@@ -332,7 +422,7 @@ class Catalog(file: File) {
 
     fun upsertWork(id: String, title: String, author: String, titleKey: String, authorKey: String) {
         exec(
-            "INSERT INTO works (id, title, author, title_key, author_key, updated) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, author = excluded.author",
+            "INSERT INTO works (id, title, author, title_key, author_key, updated) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET title = excluded.title, author = excluded.author, missing_since = NULL",
             id, title, author, titleKey, authorKey, System.currentTimeMillis(),
         )
     }
@@ -423,11 +513,21 @@ class Catalog(file: File) {
     fun backups(dir: java.io.File): List<java.io.File> = dir.listFiles { f -> f.name.startsWith("catalog-") && f.name.endsWith(".db") }?.sortedByDescending { it.name }.orEmpty()
 
     fun removeWork(id: String) { exec("DELETE FROM works WHERE id = ?", id) }
+    /** Every id, hidden works included (the scanner's view). */
     fun allIds(): List<String> = query("SELECT id FROM works") { it.getString(1) }
+    /** The ids clients can see. */
+    fun visibleIds(): List<String> = query("SELECT id FROM works WHERE missing_since IS NULL") { it.getString(1) }
 
     companion object {
+        private val NOT_ALNUM = Regex("""[^\p{L}\p{N}]+""")
+        /** Lowercase, runs of anything but letters and digits as one space, trimmed; null for an empty key or the audiobook marker genres. */
+        fun genreKey(g: String): String? = g.lowercase().replace(NOT_ALNUM, " ").trim().takeUnless { it.isEmpty() || it == "audiobook" || it == "audiobooks" }
+
         /** Separates the entries of a list kept in one column. */
         const val SEP = "\u001f"
+        /** Up to this many works, series, people and overlay rows are read only for them. */
+        const val SCOPED_MAX = 200
+        private const val AUDIO_ONLY = "EXISTS (SELECT 1 FROM audio_only a WHERE a.title_key = w.title_key AND a.author_key = w.author_key)"
         /** The fields the overlay can correct. */
         val FIELDS = listOf("title", "subtitle", "authors", "narrators", "series", "description", "publishedYear", "publisher", "language", "genres", "cover")
         fun encodeSeries(series: List<SeriesRef>) = series.joinToString(SEP) { it.name + "\u001e" + (it.sequence?.toString() ?: "") }

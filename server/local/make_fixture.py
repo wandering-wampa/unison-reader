@@ -65,7 +65,7 @@ if not os.path.exists(catalog):
     db.commit(); db.close()
     with open(os.path.join(root, 'credentials.txt'), 'w') as f:
         f.write('\n'.join(lines) + '\n')
-# Two audiobooks with no ebook to pair with (so nothing tries to sync them), for the watch app and the players: tones,
+# Two audiobooks with no ebook to pair with (so nothing tries to sync them), the audio-only test books: tones,
 # a different pitch for each track, written as WAV. The scanner reads their lengths through ffprobe; a machine without
 # one gets a stand-in from Start-LocalServer.ps1 (server/local/ffprobe_stub.cs).
 import array, math, struct, wave, zlib

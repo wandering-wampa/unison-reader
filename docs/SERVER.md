@@ -150,6 +150,7 @@ afterwards: the libraries are read again every two minutes.
 
 Then it asks for the password for `admin` twice, eight characters or more, and signs you in. The Admin page
 adds the other people in the house, each with a role (admin or member) and a password they can change.
+Changing a password signs that person out of their other devices; the device used for the change stays signed in, and an admin's reset signs out all of them.
 
 Setup works once. From the moment any account has a password the setup page is no longer shown,
 `POST /api/setup` answers 409, and the sign-in form is the only way in. The one way to open it again is
@@ -269,11 +270,13 @@ forever, so installed libraries carry over.
 ## Server design
 
 **Scanner.** Walks the audiobook root (`Author/Title/`, tracks ordered numerically, durations and
-chapters from ffprobe) and the ebooks: a Calibre library through `metadata.db` (books, authors, formats, covers), or, when the folder has no `metadata.db`, every EPUB under it through its own OPF metadata and cover. The two are never mixed. In the second case an EPUB is opened again only when its size or modification time changes, and covers are written to the data folder.
+chapters from ffprobe) and the ebooks: a Calibre library through `metadata.db` (books, authors, formats, covers), or, when the folder has no `metadata.db`, every EPUB under it through its own OPF metadata and cover. The two are never mixed. In the second case an EPUB is opened again only when its size or modification time changes, and covers are written to the data folder. An audiobook that has no cover of its own is given one at the next scan, from the first of three sources: a `cover` or `folder` picture (jpg or png, any letter case) in its folder; any other jpg, jpeg, png or webp there (a name containing `cover`, `folder` or `front` first, otherwise the largest); the picture embedded in its first audio file, taken out with ffmpeg and kept under `audio-covers` in the data folder. The audiobook folder itself is never written to. An ebook's cover and one an admin chose still come first.
 Pairs an audiobook with an ebook through `BookIdentity`: conservative title aliases, full authors,
 and known series/volume metadata. Persistence keys and work IDs are unchanged by these comparison
 rules. Each title becomes a *work* with zero or one ebook and zero or one audiobook; the
 shelves the app shows (Ready, Getting ready, Missing a piece) fall out of that.
+
+A scan never removes books because a folder could not be read. If the ebook folder or the audiobook folder cannot be listed, or comes back empty although the server already knows books from it (a network share that is down, or a mount point that is not mounted), the pass changes nothing and the admin page says which folder could not be read or is empty. If a folder is empty because you removed everything from it on purpose, press "It is empty on purpose" in the Server panel of the admin page; the server then scans normally, and the protection returns the next time that folder lists a book. A folder that could not be read cannot be accepted this way: fix the mount. A Calibre `metadata.db` that cannot be copied counts as an ebook folder that could not be read. A scan that would hide at least five books and more than a quarter of the books the server shows (a library read only in part, for example) is also held back: nothing is hidden or deleted, new and changed books are still saved, and the admin page says "N of the M books the server knows were not found at the last check. Nothing was hidden." If you did remove that many on purpose, press "They were removed on purpose" and then "Yes, hide the books that were not found"; the next scan hides them, with the 30 days below, and the protection applies again after that scan. A book whose files disappear from a readable folder is hidden from everyone but is not deleted: its sync, reading positions and corrections are kept for 30 days, and if the files come back within that time the book returns as it was, without being read or synced again. After 30 days it is removed.
 
 **Metadata.** Each work carries subtitle, description, published year, publisher, language, rating, genres, any number of series with a sequence, authors and narrators. Sources are ranked: Calibre's `metadata.db`, or the EPUB's own metadata when there is no `metadata.db` (3), Audiobookshelf's `metadata.json` beside the audio (2), the audio files' tags (1), the folder name (0); a field set by a stronger source is never overwritten by a weaker one, and a weaker source only fills blanks. Nothing is written back to either library.
 
@@ -289,7 +292,7 @@ progress is visible through the API. Alignment VERSION is shared with the app th
 unit is done but fewer than a fifth of the book's sentences were found in the audio (the audiobook is another
 book or edition, or the book is not in English), the status is `Failed: only N% of the text was found in the
 audio` and the work stays on the Getting ready shelf; a server that already held such a work as Synced
-changes it the next time it starts. Sync again (`POST /api/works/{id}/sync?restart=true`) tries it over.
+changes it the next time it starts. Sync again (`POST /api/works/{id}/sync?restart=true`) tries it over. Sync again during a running sync waits for the workers to stop, then wipes the alignment and starts over; a Pause sent meanwhile wins. Pausing a sync and Sync again need an admin, and a restart is written to the audit log; starting or resuming a sync stays open to every signed-in member.
 
 **Accounts.** `users` (name, PBKDF2-SHA256 password hash with a per-user salt, role admin or member),
 `tokens` (one per signed-in device, revocable) and `shelf` (user, work, state reading/queued/finished,
@@ -320,12 +323,14 @@ on the web client's Account page (`GET /api/users/audit`). Not yet: a second fac
 
 | Route | Purpose |
 |---|---|
-| `GET /` (and any non-API path) | the web client, a static single-page app packaged in the server jar (`web/`), with foliate-js at `/foliate/` |
+| `GET /` | the web client, a static single-page app packaged in the server jar (`web/`), with foliate-js at `/foliate/`; a path that is not one of its files answers 404, and so does an unknown path under `/api` (a JSON message, for every method; 401 when not signed in) |
 | `GET /api/health` | version, library counts, sync queue |
-| `GET /api/works?q=…&shelf=…` | the library with pairing and sync state (the shelves); `q` searches title, subtitle, authors, narrators and series |
+| `GET /api/works?q=…&shelf=…&format=…` | the library with pairing and sync state (the shelves); `q` searches title, subtitle, authors, narrators and series; `format` is `ebook` or `audio` and keeps the works that have that format (a work with both is in both) |
 | `GET /api/series`, `/api/series/{name}` | every series (size, synced count, total audio, authors, a cover) and a series' works in sequence order |
 | `GET /api/authors`, `/api/authors/{name}` | authors with counts, and an author's works grouped by series then standalone |
 | `GET /api/narrators`, `/api/narrators/{name}` | the same for narrators |
+| `GET /api/genres`, `/api/genres/{name}` | genres with their number of works (spellings that differ only in case or punctuation are one genre) and a genre's works |
+| `format=ebook` or `format=audio` on the series, author, narrator and genre routes | counts and lists within that format; a name with no work in it is not listed; any other value is answered with 400 |
 | `GET /api/works/{id}` | one work: metadata, tracks, chapters, sync summary |
 | `GET /api/works/{id}/ebook` | the EPUB |
 | `GET /api/works/{id}/passages` | parsed sentences (the app's passage list) |
@@ -335,8 +340,6 @@ on the web client's Account page (`GET /api/users/audit`). Not yet: a second fac
 | `GET /api/works/{id}/speed`, `PUT /api/works/{id}/speed` (speed) | my listening speed for the book, 0.5 to 3; GET gives 1 with `updated` 0 when never set; also in the work detail as `speed` |
 | `POST /api/login` | name + password + device → token and user; `web: true` also sets the browser cookie; throttled |
 | `GET /api/setup`, `POST /api/setup` (password, key, device, web) | the first run, no token needed. GET answers `needed` (true while no account has a password), `key` (true when this caller must also send the setup key), `reset` (true after the admin password was reset, until a new one is chosen; `needed` is then true too), `minPassword`, and `library`: what the scan has found so far (`ebooks`, `audiobooks`, `paired`, `scanned` once a pass has ended, `calibre` when the ebook folder has a `metadata.db`, `ebookFolderEmpty`, `audiobookFolderEmpty`). POST gives the built-in `admin` its password and answers as a sign-in does (token and user, and the cookie with `web: true`). 403 without the right key from an address that is not private, 400 for a password under eight characters, 429 after five wrong keys from one address, and 409 once any account has a password, after which GET answers only `needed: false` |
-| `POST /api/link/start` (device), `POST /api/link/claim` (secret) | Wear OS sign-in, the watch's side, no token needed. `start` answers a six-digit `code` to show, a `secret` to ask with, when the code `expires` and how often to ask (`poll`, seconds); 429 when five codes already wait from that address, or a hundred in all. `claim` answers `{status: "waiting"}` until a signed-in person approves the code, then once `{status: "approved", token, user}`; 410 when the code has ended, been used, or never was |
-| `GET /api/me/link/{code}`, `POST /api/me/link/{code}` | Wear OS sign-in, the signed-in side: which device shows this code (`device`, `address`, `created`), and yes, sign it in as me. 404 for a code nobody is waiting behind; five wrong codes in a row and the person waits, as with wrong passwords (429) |
 | `POST /api/me/cookie` | sets the browser cookie for a token a browser already holds |
 | `GET /api/users/audit` | admin: recent sign-ins, failures, lockouts and account changes |
 | `GET /api/me`, `DELETE /api/me/tokens/{prefix}`, `POST /api/me/password` | who I am and my devices; sign a device out; change my password (the body carries `current` and `password`; a wrong `current` is 403, a missing one 400, repeated wrong tries 429) |
@@ -346,7 +349,7 @@ on the web client's Account page (`GET /api/users/audit`). Not yet: a second fac
 | `PUT/DELETE /api/me/collections/{id}/works/{work}` | put a work in a list or take it out; `{id}` is a collection's number or `want`. Putting a work on the shelf (`PUT /api/me/shelf/{work}`, any state) takes it off Want to read |
 | `GET /api/lookup?q=<words>` | looking a book up before asking for it (any signed-in person): what Audible and Open Library say about the words typed (title, authors, narrators, series, year, publisher, genres, summary, a cover address), and for each answer the library's own work when it has the book (`work`, `hasEbook`, `hasAudio`) and whether it is already on the wanted list (`wanted`); `errors` names a catalogue that did not answer. Only the words typed leave the house |
 | `GET /api/lookup/image?url=<cover address>` | a cover the lookup offered, fetched by the server (the two catalogues' image hosts only) |
-| `GET /api/requests`, `POST /api/requests` (title, author, note, kind ebook/audiobook/both) | the household's wanted list: every request with its status (wanted, arrived, declined), who asked, where (web or app) and the work once it arrived. Asking for a book already wanted answers with that request; asking for one the library already has answers `arrived` at once |
+| `GET /api/requests`, `POST /api/requests` (title, author, note, kind ebook/audiobook/both) | the household's wanted list: every request with its status (wanted, arrived, declined), who asked, where (web or app) and the work once it arrived. Asking for a book already wanted answers with that request, widening its kind (ebook and audiobook make both) and adding the new note; asking for one the library already has answers `arrived` at once |
 | `PUT /api/requests/{id}` (status, work), `DELETE /api/requests/{id}` | admin: settle a request by hand; the person who asked or an admin: remove it |
 | `GET /api/works/{id}/meta`, `PUT /api/works/{id}/meta` | admin: the metadata overlay. GET gives the work as shown (`current`, with `edited` naming the corrected fields) and as the libraries describe it (`source`). PUT takes any of title, subtitle, authors, narrators, series (name, sequence), description, publishedYear, publisher, language, genres, cover (an address from a lookup), and `reset` (fields to put back); a value equal to the source removes the correction |
 | `GET /api/works/{id}/meta/lookup?title=…&author=…`, `GET /api/works/{id}/meta/image?url=…` | admin: what Audible's catalogue and Open Library say about the book (candidates to take into the overlay), and a candidate's cover fetched through the server (the page loads images from the server only) |
@@ -356,13 +359,13 @@ on the web client's Account page (`GET /api/users/audit`). Not yet: a second fac
 | `GET /api/me/stats`, `GET /api/me/year`, `GET /api/me/year/{yyyy}` with `X-Timezone: <IANA zone>` | days and hours are counted in the asker's time zone (the server's own when the header is absent or unknown) |
 | `GET /api/me/year`, `GET /api/me/year/{yyyy}` | the year in review (this year, or the one asked for): totals, days active, longest streak, biggest day, favourite hour, most-read author, months, every day of the year, top books, books finished that year, the years with anything, and the active days of every year for the heat-maps |
 | `GET /api/me/marks` | everything I marked, by work (id, title, author, sentence count, marks in reading order), the most recently marked book first; the web's Highlights page |
-| `POST /api/me/sessions`, `GET /api/me/stats` | listening and reading sessions from the app (batches; under three seconds dropped; a resend is stored once), and the numbers made from them: today/week/month/year/all totals, streak and longest streak, days with books, finished count, 365 days, hours of day, top books |
+| `POST /api/me/sessions`, `GET /api/me/stats` | listening and reading sessions from the app (batches; under three seconds, over 24 hours or ending more than 10 minutes after the server's clock dropped; a resend is stored once), and the numbers made from them: today/week/month/year/all totals, streak and longest streak, days with books, finished count, 365 days, hours of day, top books |
 | `POST /api/scan` | admin: read the libraries again (audited) |
 | `GET /api/pairing` | admin: audiobooks waiting for an ebook (with same-author ebook suggestions), ebooks without audio, audio-only marks |
 | `PUT /api/works/{id}/pair` (ebookWork), `DELETE /api/works/{id}/pair` | admin: pair an audiobook with an ebook by title and author keys (kept across rescans), or remove the manual pairing |
 | `PUT/DELETE /api/works/{id}/audio-only` | admin: mark an audiobook as having no ebook to wait for (ready as it is), or clear the mark |
 | `GET /api/users/backups`, `POST /api/users/backup` | admin: the database backups in `data/backups` (nightly at 02:30 and at start, seven kept), or write one now |
-| `POST /api/works/{id}/sync` | start or resume syncing; `DELETE` cancels |
+| `POST /api/works/{id}/sync` | start or resume syncing (any member); `?restart=true` and `DELETE` (pause) need an admin |
 | `PUT /api/works/{id}/pair` | manual pairing override |
 
 Files are served with ETags so the app can keep a downloaded copy and know when it is stale.
@@ -374,8 +377,6 @@ compiled on the host. The steps, the settings and the first sign-in are under "R
 is copied into the data folder before SQLite opens it, so no journal or lock files ever appear in
 the Calibre library. Calibre, Audiobookshelf and anything else that uses the same folders are unaffected. Memory: the model is
 21 MB; each worker holds one unit of audio (a chapter at 16 kHz float is under 200 MB an hour).
-
-**Wear OS sign-in.** A watch is a poor place to type a password, so it signs in by a code (`DeviceLinks.kt`). The watch asks for a code and shows it; a person already signed in (the phone app's Settings, or the web's Account page) types the code, is shown which device asked and from which address, and approves; the watch, which has been asking every two seconds with a secret only it holds, is then given a device token of its own for that person, exactly as a sign-in by password would give it (a year's idle life, revocable from the device list). A code is six digits, lasts ten minutes (two more once approved, so the watch can collect) and works once. Codes wait in memory only: a restart drops them and the watch asks again. The secret is kept as its SHA-256, and the token is made at the moment the watch collects it, so no token waits on the server. Typing a code needs a sign-in sent as a bearer token (the browser's cookie does not count), approvals and the sign-in that follows go to the audit log (`sign-in code approved`, `signed in` with the detail `by code`), and `python server\local\check_link.py` exercises all of it against the local server.
 
 **Lists.** `collections` (id, user, name, kind, created, updated) and `collection_works` (collection, work, added) hold each person's Want to read and hand-made collections; a list is its owner's alone. Want to read is for a book not picked up yet: shelving a work removes it there. Reset progress and removing a person clear their lists.
 
@@ -436,14 +437,3 @@ The separator is a space, a middle dot (U+00B7) and a space. A request for both 
   pause, so listening from the player sheet or the lock screen reaches the other devices.
 - Importing files and syncing on the device itself are in the standalone build only (`-Pstandalone`, see
   [BUILD.md](BUILD.md)).
-
-## The watch app
-
-Unison for Wear OS (`wear/`, its own app id `dev.homescreenreader.wear`, Wear OS 6 and later) listens to the server's audiobooks from the watch alone, over Wi-Fi or LTE. It shares `ServerClient` with the phone app (the class lives in `core`).
-
-- **Sign in** by a code (above). The server's address comes from `unison.defaultServer` at build time and can be typed on the watch.
-- **The shelf**: the books the person is reading or has queued that have audio (`GET /api/me/shelf`, then each work's detail, kept on the watch and asked for again after twelve hours). A book that leaves the shelf leaves the watch unless its audio was downloaded.
-- **Download** puts a book's tracks on the watch through a foreground service, one book at a time; each track is fetched with `Range` so a dropped connection costs only what had not arrived (`ServerClient.resume`; the server's ETag says whether the file is still the same one). **Listen** without a download streams, with the watch's token on each request.
-- **The network**: beside its phone a watch talks through the phone's Bluetooth, which is too slow for audio, so while a book downloads or streams the app asks for Wi-Fi or LTE and binds itself to it. Away from the phone it is on one of those already.
-- **The place** follows the rule the phone and the web follow: a newer place from another device is taken when nothing moved on the watch since the last exchange; both moved and close (two minutes of audio), the watch's is kept and sent; far apart, the watch asks (Go there or Stay here; leaving the question changes nothing and it asks again). Saved every second on the watch, sent every twenty seconds while playing and on pause, with `?base=`; what could not be sent goes when the shelf is next refreshed. The watch starts at the place's audio time, as the phone's and the web's players do; the text's place never decides it (someone can be reading in one part and listening in another), except for a book that was read and never listened to, which starts where the reading is. A place travels whole, text and audio, so what the watch sends as the sentence matters to the other devices: when text and audio were together as the watch took the place (within thirty sentences, by the alignment fetched with the book), it sends the sentence being narrated and they stay together; when they were apart, it sends the text's place back exactly as it was.
-- **Speed** is the book's own (`/speed`), **listening time** is sent as sessions for the statistics, and signing out on the watch sends what it still owes, removes its token from the server and deletes its books.

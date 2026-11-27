@@ -30,7 +30,7 @@ class MainActivity : AppCompatActivity() {
     private var reader: FormattedReader? = null
     private var detailStatus: TextView? = null
     private var syncLine: TextView? = null
-    private val syncLines = mutableListOf<Pair<TextView, Book>>()
+    private val syncLines = mutableListOf<Triple<TextView, Book, Boolean>>()
     private var redisplay: (() -> Unit)? = null
     private var shelfSignature = ""
     /** What the library screens show that can change underneath them; the tick re-renders only when this moves. */
@@ -76,11 +76,23 @@ class MainActivity : AppCompatActivity() {
     private var chosenAt = 0L
     private var brightnessPill: TextView? = null
     private var readerInsets: androidx.core.graphics.Insets? = null
+    /** The listening dock's height above the system bar, and the page's own bottom margin (reader.js: renderer margin 34px). */
+    private val dockDp = 50
+    private val pageMarginDp = 34
+    /** Whether the open book has audio, decided once when the reader opens: its pages always leave room for the dock, playing or not, so nothing on the page moves when narration starts or stops. */
+    private var readerHasDock = false
+    /** The dock room (px) currently added to the page view's bottom margin; 0 when it does not apply. */
+    private var dockRoom = 0
     private var browsedAt = 0L
     private var bottomChrome: LinearLayout? = null
     private var listeningDock: LinearLayout? = null
     private var dockTime: TextView? = null
     private var dockPause: MaterialButton? = null
+    private var fadeTop: View? = null
+    private var fadeBottom: View? = null
+    private var fadeTopHeight = 0 // the height the top fade was built for
+    private var fadeTopTall = false // whether its drawing is the controls-showing look
+    private var fadePaper: Int? = null // the paper colour the fade drawables were built for
     private var chromeVisible = false
     private var pageFraction = 0.0
 
@@ -88,14 +100,22 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         state = ReadingState(this)
         db = Library(this)
+        // Playback started from the headphones or the lock screen finds another device's newer place while the reader is open on the book: it asks here, the text never moves by itself.
+        PlaybackService.placeAsker = object : PlaceAsker {
+            override fun readerOpenOn(bookId: String) = !gone() && reader != null && current?.id == bookId
+            override fun ask(bookId: String, remote: ServerClient.Position) {
+                val b = db.load(bookId) ?: return
+                askWhichPlace(b, remote) { there -> if (there && reader != null && current?.id == bookId) showReader(b) }
+            }
+        }
         onBackPressedDispatcher.addCallback(
             this,
             object : androidx.activity.OnBackPressedCallback(true) {
                 override fun handleOnBackPressed() {
                     // In the reader the first Back puts the controls away; otherwise Back is the screen before this one.
-                    // From the Library, Back is Home; from Home, out of the app.
+                    // From eBooks, Audiobooks or Journal, Back is Home; from Home, out of the app.
                     if (reader != null && chromeVisible) toggleChrome(false)
-                    else if (reader == null && trail.lastOrNull() == "library" && state.libraryTab != "shelf") goHome()
+                    else if (reader == null && ((trail.lastOrNull() == "library" && state.libraryTab != "shelf") || trail.lastOrNull() == "journal")) goHome()
                     else goBack(backTarget)
                 }
             },
@@ -160,7 +180,7 @@ class MainActivity : AppCompatActivity() {
                 PlaybackService.forget(); stopService(Intent(this, PlaybackService::class.java))
                 state.forgetPersonalState()
                 state.serverUrl = address; state.serverToken = token; state.serverUser = ""; state.serverRole = ""; state.lastAccount = ""; state.standalone = false
-                serverWorks = null; serverShelf = null; serverSeriesProgress = null; serverLists = null; shelfReconciled = false; statsLine = null
+                serverWorks = null; serverShelf = null; serverSeriesProgress = null; serverLists = null; shelfReconciled = false; statsLine = null; genreCache.clear()
                 note("Connected to $host"); library()
             }
             .setNegativeButton("Cancel", null).show()
@@ -193,7 +213,7 @@ class MainActivity : AppCompatActivity() {
         val leaving = trail.lastOrNull()
         if (leaving != null && leaving != route) screenScroll?.let { scrolls[leaving] = it.scrollY }
         val signedOut = state.serverToken.isBlank() && !state.standalone
-        if (route == "library" || (route == "signin" && signedOut)) { trail.clear(); trail.add(route); return }
+        if (route == "library" || route == "journal" || (route == "signin" && signedOut)) { trail.clear(); trail.add(route); return }
         val at = trail.indexOf(route)
         if (at >= 0) { while (trail.size > at + 1) trail.removeAt(trail.lastIndex); return }
         // Opened straight from outside (a widget, a notification): the library is behind it.
@@ -213,8 +233,9 @@ class MainActivity : AppCompatActivity() {
             "library" -> library()
             "signin" -> signInScreen()
             "shelf" -> shelfPage()
-            "series" -> seriesPage(arg)
-            "author" -> authorPage(arg)
+            "series" -> seriesPage(unformat(arg), formatOf(arg) ?: seriesFmt(unformat(arg)))
+            "author" -> authorPage(unformat(arg), formatOf(arg) ?: authorFmt(unformat(arg)))
+            "genre" -> genrePage(unformat(arg), formatOf(arg) ?: state.lastFormat)
             "narrator" -> narratorPage(arg)
             "player" -> { val b = book() ?: return false; if (b.tracks.isEmpty()) return false; playerScreen(b) }
             "work" -> workDetail(worksSeen[arg] ?: serverWorks?.firstOrNull { it.id == arg } ?: return false)
@@ -231,7 +252,7 @@ class MainActivity : AppCompatActivity() {
             "downloads" -> downloadsScreen()
             "devices" -> devicesScreen()
             "users" -> usersScreen()
-            "lists" -> listsScreen()
+            "journal", "lists" -> journalScreen()
             "list" -> listScreen(arg)
             "wanted" -> wantedScreen()
             "lookup" -> lookupScreen()
@@ -293,6 +314,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        PlaybackService.placeAsker = null
         reader?.destroy()
         db.close()
         super.onDestroy()
@@ -313,6 +335,9 @@ class MainActivity : AppCompatActivity() {
     private var navBar: LinearLayout? = null
     private var miniBar: LinearLayout? = null
     private var miniBarBook: Book? = null
+    /** Home only: the book of the Continue your story hero. The mini player keeps out of the way while it shows that same book, until that book has played or started on this visit. */
+    private var heroBookId: String? = null
+    private var miniBarShown = false
     private var miniBarCover: FrameLayout? = null
     private var miniBarTitle: TextView? = null
     private var miniBarLine: TextView? = null
@@ -320,16 +345,30 @@ class MainActivity : AppCompatActivity() {
     private var playerUpdate: Runnable? = null
 
     private fun goHome() { librarySearch = ""; state.libraryTab = "shelf"; library() }
-    private fun goLibrary() { librarySearch = ""; state.libraryTab = state.libraryBrowse; library() }
+    /** eBooks or Audiobooks ("ebooks" or "audio"): the sub-view it was left on comes back; the filter starts again when the section changes. */
+    private fun goSection(tab: String) {
+        librarySearch = ""
+        if (state.libraryTab != tab) { libraryFilter = "all"; genresExpanded = false }
+        booksShown = 40; state.libraryTab = tab; library()
+    }
+    /** Back from a person, series or genre page: the section and the sub-view it belongs to. */
+    private fun backToSection(fmt: String, view: String) { state.libraryTab = if (fmt == "audio") "audio" else "ebooks"; state.subView(fmt, view); library() }
 
-    /** Home and Library, on every ordinary screen: Home is the shelf (what is being read and listened to), Library the whole collection. */
+    /** Home, eBooks, Audiobooks and Journal, on every ordinary screen. Home is the shelf (what is being read and listened to); the two sections are the whole collection by format; Journal holds the personal things. */
     private fun bottomBar(): LinearLayout {
-        val route = trail.lastOrNull().orEmpty().substringBefore(':')
+        val last = trail.lastOrNull().orEmpty()
+        val route = last.substringBefore(':')
+        val pageFormat = formatOf(last.substringAfter(':', ""))
+        val sectionOfFormat = if ((pageFormat ?: state.lastFormat) == "audio") "audio" else "ebooks"
         val section = when {
-            route == "library" -> if (state.libraryTab == "shelf") "home" else "library"
-            route in setOf("lists", "list", "wanted", "lookup", "found") -> "lists"
-            route in setOf("shelf", "allMarks", "stats", "year") -> "home"
-            route in setOf("series", "author", "narrator", "work", "kind") -> "library"
+            route == "library" -> when (state.libraryTab) { "ebooks" -> "ebooks"; "audio" -> "audio"; else -> "home" }
+            route in setOf("journal", "lists", "list", "wanted", "lookup", "found") -> "journal"
+            // Highlights, statistics and the year belong to Journal when the person came from it, else to wherever they came from (Home's stats row).
+            route in setOf("allMarks", "stats", "year") -> if (trail.any { it == "journal" || it == "lists" }) "journal" else "home"
+            route == "shelf" -> "home"
+            route == "narrator" -> "audio"
+            route in setOf("series", "author", "genre") -> sectionOfFormat
+            route in setOf("work", "kind") -> if (state.lastFormat == "audio") "audio" else "ebooks"
             else -> ""
         }
         val bar = ui.column()
@@ -346,9 +385,9 @@ class MainActivity : AppCompatActivity() {
             row.addView(cell, LinearLayout.LayoutParams(0, -2, 1f))
         }
         item("home", "home", "Home") { goHome() }
-        item("library", "library", "Library") { goLibrary() }
-        // Want to read, collections and the wanted list live on the server: without one there is nothing to show.
-        if (state.serverUrl.isNotBlank()) item("lists", "contents", "Lists") { listsScreen() }
+        item("ebooks", "book", "eBooks") { goSection("ebooks") }
+        item("audio", "headphones", "Audiobooks") { goSection("audio") }
+        item("journal", "contents", "Journal") { journalScreen() }
         bar.addView(row)
         return bar
     }
@@ -393,6 +432,8 @@ class MainActivity : AppCompatActivity() {
             miniBarTitle?.text = b.title
         }
         val playing = PlaybackService.playing()
+        if (playing || PlaybackService.starting(b.id)) miniBarShown = true
+        if (heroBookId == b.id && !miniBarShown) { if (bar.visibility != View.GONE) bar.visibility = View.GONE; return }
         val position = PlaybackService.livePosition().takeIf { it >= 0 } ?: state.audio(b.id)
         miniBarLine?.text = listOfNotNull(b.chapters.lastOrNull { it.start <= position }?.title?.trim()?.takeIf { it.isNotBlank() }, Alignment.clock(position) + if (playing || PlaybackService.starting(b.id)) "" else "  ·  paused").joinToString("  ·  ")
         miniBarPlay?.let { showPlay(it, b.id, ui.ink) }
@@ -403,7 +444,7 @@ class MainActivity : AppCompatActivity() {
         closeReading(); backTarget = null; onSettings = false
         playerUpdate?.let { handler.removeCallbacks(it) }; playerUpdate = null
         pageFrame?.cancelTurn(); reader?.destroy(); reader = null; pageFrame = null
-        readingShell = null; readingChrome = null; readingFooter = null; chapterLabel = null
+        readingShell = null; fadeTop = null; fadeBottom = null; fadePaper = null; readingChrome = null; readingFooter = null; chapterLabel = null
         miniTime = null; miniPlay = null; followButton = null; detailStatus = null; syncLine = null
         listenButton = null; bottomChrome = null
         syncLines.clear(); redisplay = null; overviewRefresh?.let { handler.removeCallbacks(it) }; overviewRefresh = null
@@ -415,7 +456,7 @@ class MainActivity : AppCompatActivity() {
         outer.addView(root, LinearLayout.LayoutParams(-1, 0, 1f))
         // Signed out there is nowhere to go yet; the player has the whole screen to itself.
         val withBars = bars && (state.serverToken.isNotBlank() || state.standalone)
-        navBar = null; miniBar = null; miniBarBook = null
+        navBar = null; miniBar = null; miniBarBook = null; heroBookId = null; miniBarShown = false
         if (withBars) {
             outer.addView(miniPlayer(), LinearLayout.LayoutParams(-1, -2).apply { setMargins(dp(12), 0, dp(12), dp(8)) })
             navBar = bottomBar().also { outer.addView(it) }
@@ -476,8 +517,32 @@ class MainActivity : AppCompatActivity() {
         else -> syncSummary(b)
     }
 
+    /** The same state as [shelfLine] in a form that fits one line: the narrow column beside the cover on Home and the library's list rows. */
+    private fun shortLine(b: Book): String {
+        val server = state.serverWork(b.id) != null
+        if (readiness(b) == Readiness.MISSING) return if (server) (if (b.passages.isEmpty()) "Audiobook only" else "Ebook only") else if (b.passages.isEmpty()) "Needs the ebook" else "Needs an audiobook"
+        val p = db.prep(b.id)
+        val percent = if (b.duration > 0) (100 * p.first.coerceAtMost(b.duration) / b.duration).coerceIn(0, 100) else 0
+        val matched = if (b.passages.isEmpty()) 0 else 100 * db.anchorCount(b.id) / b.passages.size
+        return when {
+            server && state.syncPending(b.id) && state.syncFailed(b.id).isNotEmpty() -> state.syncFailed(b.id)
+            server && state.syncPending(b.id) -> "Syncing · $matched% matched"
+            server -> if (db.anchorCount(b.id) > 0) "Synced · ${if (state.serverDownloaded(b.id)) "downloaded" else "streaming"}" else "Waiting for the server's sync"
+            PreparationService.running && PreparationService.bookId == b.id -> p.second.ifBlank { "Syncing" }
+            p.second == "Synced" && poorlyMatched(b) -> "Only $matched% matched"
+            p.second == "Synced" -> "Synced"
+            p.second.startsWith("Paused") -> "Sync paused · $percent%"
+            p.first > 0 -> "Partly synced · $percent%"
+            else -> "Not synced yet"
+        }
+    }
+
     // ---- The library: My shelf, the whole collection, series and authors. Server data is cached per session.
     private var libraryFilter = "all"
+    private val genreCache = HashMap<String, List<ServerClient.GenreSummary>>()
+    private val genreFetched = HashMap<String, Long>()
+    private var genreError: String? = null
+    private var genresExpanded = false
     private var serverWorks: List<ServerClient.Work>? = null
     private var serverSeriesList: List<ServerClient.SeriesSummary>? = null
     private var serverAuthorsList: List<ServerClient.PersonSummary>? = null
@@ -488,6 +553,7 @@ class MainActivity : AppCompatActivity() {
     private var shelfReconciled = false
     private var statsLine: String? = null
     private var statsLineAt = 0L
+    private var statsFit: Pair<String, Float>? = null // the text and the size (sp) it was last fitted to
     private fun clockish(ms: Long): String { val m = ms / 60000; return if (m < 60) "$m min" else "${m / 60} h ${m % 60} min" }
 
     /** This person's reading and listening: totals, streaks, the last two weeks, top books, hours of the day. */
@@ -619,7 +685,7 @@ class MainActivity : AppCompatActivity() {
         arrive("stats")
         current = null
         val body = screen("")
-        pageHeader(body, "READING & LISTENING") { settings() }
+        pageHeader(body, "READING & LISTENING") { journalScreen() }
         body.addView(ui.text("Your year in books", 28f, true))
         ui.space(body, 6)
         body.addView(ui.text(if (state.serverUser.isNotBlank()) "For ${state.serverUser}, from every device you sign in on." else "From every device connected with this server.", 13f).apply { setTextColor(ui.muted) })
@@ -709,20 +775,24 @@ class MainActivity : AppCompatActivity() {
         val author: String get() = book?.author?.ifBlank { null } ?: work?.author?.ifBlank { null } ?: "Unknown author"
         val series: List<ServerClient.SeriesRef> get() = work?.series ?: emptyList()
         val local: Boolean get() = book != null
+        /** What the book has: a server work says so itself, a book only on this device by its sentences and tracks. */
+        val hasEbook: Boolean get() = if (work != null) work.hasEbook else book!!.passages.isNotEmpty()
+        val hasAudio: Boolean get() = if (work != null) work.hasAudio else book!!.tracks.isNotEmpty()
+        fun has(format: String) = if (format == "audio") hasAudio else hasEbook
         val finished: Boolean get() = book != null && state.finished(book.id) > 0
         val ready: Boolean get() = if (book != null) readiness(book) == Readiness.READY else work!!.shelf == "ready"
         val line: String
             get() = when {
-                book != null -> shelfLine(book)
+                book != null -> shortLine(book)
                 work!!.shelf == "ready" -> "Synced on your server · tap to add"
                 work.shelf == "preparing" -> when {
                     work.status.startsWith("Ebook could not be read") || work.status.startsWith("Failed") -> work.status
                     work.passages == 0 -> "Waiting for the ebook to be read"
-                    work.syncedPercent > 0 -> "Syncing on your server · ${work.syncedPercent}% · tap to add"
-                    else -> "Queued for syncing on your server · tap to add"
+                    work.syncedPercent > 0 -> "Syncing · ${work.syncedPercent}% · tap to add"
+                    else -> "Queued for syncing · tap to add"
                 }
                 // One half alone is still a book: an ebook to read, an audiobook to listen to.
-                work.hasEbook && !work.hasAudio -> if (work.ebookFormat == "epub") "Ebook on your server · tap to add" else "Ebook on your server (${work.ebookFormat.ifBlank { "unknown format" }}) · this app reads EPUB"
+                work.hasEbook && !work.hasAudio -> if (work.ebookFormat == "epub") "Ebook on your server · tap to add" else "Ebook (${work.ebookFormat.ifBlank { "unknown format" }}) · this app reads EPUB"
                 else -> "Audiobook on your server · tap to add"
             }
         fun open() { if (book != null) details(book) else workDetail(work!!) }
@@ -804,27 +874,26 @@ class MainActivity : AppCompatActivity() {
 
     /** A cover for a server work: cached from the server the first time it is shown. */
     private fun serverCover(work: ServerClient.Work, width: Int, height: Int): View {
-        val frame = FrameLayout(this).apply { background = ui.shape(ui.surface, 5); clipToOutline = true; layoutParams = LinearLayout.LayoutParams(dp(width), dp(height)); contentDescription = "Cover of ${work.title}" }
+        val slot = CoverSlot(ui, width, height, Gravity.CENTER).apply { contentDescription = "Cover of ${work.title}" }
         val file = File(cacheDir, if (work.coverVersion > 0) "covers/${work.id}-${work.coverVersion}.jpg" else "covers/${work.id}.jpg")
-        val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        if (file.isFile) { image.setImageURI(Uri.fromFile(file)); frame.addView(image, FrameLayout.LayoutParams(-1, -1)) }
+        if (file.isFile) slot.showFile(file)
         else {
-            frame.addView(ui.text(work.title, if (width > 80) 18f else 12f, true).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(10), dp(8), dp(10)); maxLines = 4; ellipsize = android.text.TextUtils.TruncateAt.END }, FrameLayout.LayoutParams(-1, -1))
+            slot.showPlaceholder(ui.text(work.title, if (width > 80) 18f else 12f, true).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(10), dp(8), dp(10)); maxLines = 4; ellipsize = android.text.TextUtils.TruncateAt.END })
             if (work.cover) Server.client(state)?.let { client ->
                 coverPool.execute {
-                    if (!frame.isAttachedToWindow && frame.parent == null) return@execute
+                    if (!slot.isAttachedToWindow && slot.parent == null) return@execute
                     runCatching { if (!file.isFile) client.download("/api/works/${work.id}/cover", file) }
-                    if (file.isFile) runOnUiThread { if (frame.isAttachedToWindow) { frame.removeAllViews(); image.setImageURI(Uri.fromFile(file)); frame.addView(image, FrameLayout.LayoutParams(-1, -1)) } }
+                    if (file.isFile) runOnUiThread { if (slot.isAttachedToWindow) slot.showFile(file) }
                 }
             }
         }
-        return frame
+        return slot
     }
 
     private fun coverFor(e: Entry, width: Int, height: Int): View = if (e.book != null && (e.book.cover.isNotBlank() || e.work == null)) ui.cover(e.book, width, height) else serverCover(e.work!!, width, height)
 
     /** A list row for an entry: cover, title, series, author, one status line; tap opens it. */
-    private fun entryRow(parent: LinearLayout, e: Entry, badge: String? = null, line: String? = null, live: Boolean = false) {
+    private fun entryRow(parent: LinearLayout, e: Entry, badge: String? = null, line: String? = null, live: Boolean = false, showSeries: Boolean = true, accent: Boolean = false): LinearLayout {
         val row = ui.row().apply { gravity = Gravity.TOP; setPadding(0, dp(8), 0, dp(12)); isClickable = true; contentDescription = "Open ${e.title}"; setOnClickListener { e.open() } }
         if (e.book != null) row.setOnLongClickListener { bookOptions(e.book); true }
         row.addView(coverFor(e, 54, 82))
@@ -834,14 +903,16 @@ class MainActivity : AppCompatActivity() {
         titleRow.addView(ui.text(e.title, 18f, true).apply { maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }, LinearLayout.LayoutParams(0, -2, 1f))
         info.addView(titleRow)
         ui.space(info, 4)
-        val under = listOfNotNull(e.author, e.series.firstOrNull()?.label).joinToString("  ·  ")
+        val under = listOfNotNull(e.author, if (showSeries) e.series.firstOrNull()?.label else null).joinToString("  ·  ")
         info.addView(ui.text(under, 13f).apply { setTextColor(ui.muted); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
         ui.space(info, 6)
-        val status = ui.text(line ?: e.line, 12f).apply { setTextColor(if (live) ui.liveText else ui.muted); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }
-        info.addView(status); if (live && e.book != null) syncLines += status to e.book
+        val status = ui.text(line ?: e.line, 12f).apply { setTextColor(if (live || accent) ui.liveText else ui.muted); maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END }
+        // accent only colours the line; a live line is also refreshed from the book's sync state each second.
+        info.addView(status); if (live && e.book != null) syncLines += Triple(status, e.book, true)
         row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
         row.addView(ui.icon("chevron", "Open ${e.title}", ui.muted) { e.open() })
         parent.addView(row)
+        return row
     }
 
     private fun sectionHead(parent: LinearLayout, title: String, count: Int? = null, note: String? = null, trailing: View? = null, unit: String = "book", onTap: (() -> Unit)? = null) {
@@ -866,16 +937,11 @@ class MainActivity : AppCompatActivity() {
             seeded.edit().putBoolean("shelfSeeded", true).apply()
         }
         val body = screen("")
-        val mast = ui.row()
-        val night = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
-        mast.addView(ImageView(this).apply { setImageResource(if (night) R.drawable.unison_mark_dark else R.drawable.unison_mark_light); contentDescription = "Unison" }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(12) })
-        mast.addView(ui.caption("UNISON  /  READER"), LinearLayout.LayoutParams(0, -2, 1f))
-        if (Alignment.onDevice) mast.addView(ui.icon("plus", "Import files") { pick(null) })
-        mast.addView(ui.icon("settings", "Settings") { settings() })
-        body.addView(mast)
-        // Home is the shelf alone; the Library has the search, its four categories and, for Books, the filters.
+        body.addView(masthead())
+        // Home is the shelf alone; eBooks and Audiobooks each have the search, a row of views (All, Authors, Series, Genres, and Narrators for Audiobooks) and, under All, the filters.
         val home = state.libraryTab == "shelf"
-        if (!home) state.libraryBrowse = state.libraryTab
+        val fmt = if (state.libraryTab == "audio") "audio" else "ebook"
+        if (!home) state.lastFormat = fmt
         val search = EditText(this).apply {
             hint = "Search titles, authors, series, narrators"; setTextColor(ui.ink); setHintTextColor(ui.muted)
             textSize = 14f; setSingleLine(); background = ui.shape(ui.surface, 14)
@@ -888,23 +954,25 @@ class MainActivity : AppCompatActivity() {
         val chips = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
         if (!home) {
             ui.space(body, 12)
-            body.addView(ui.text("Your library", 34f, true)); ui.space(body, 8)
-            body.addView(ui.text("A good place to lose yourself.", 14f).apply { setTextColor(ui.muted) })
-            ui.space(body, 18)
+            body.addView(ui.text(sectionName(fmt), 34f, true)); ui.space(body, 18)
             body.addView(search, LinearLayout.LayoutParams(-1, dp(48)))
             // Coming back from a result, or redrawn: the search is as it was left.
             if (librarySearch.isNotEmpty()) search.setText(librarySearch)
             ui.space(body, 14)
-            // Books · Series · Authors · Narrators
-            val tabs = ui.row()
-            for ((key, label) in listOf("books" to "Books", "series" to "Series", "authors" to "Authors", "narrators" to "Narrators")) {
-                val b = ui.button(label, state.libraryTab == key) { state.libraryTab = key; state.libraryBrowse = key; booksShown = 40; search.setText(""); redisplay?.invoke() }.apply { textSize = 13f; minHeight = dp(42); setPadding(dp(4), 0, dp(4), 0); setSingleLine(true); contentDescription = "$label tab" }
+            // All · Authors · (Narrators) · Series · Genres: the row scrolls sideways when the labels do not fit.
+            val views = listOf("all" to "All", "authors" to "Authors") + (if (fmt == "audio") listOf("narrators" to "Narrators") else emptyList()) + listOf("series" to "Series", "genres" to "Genres")
+            val tabs = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+            val tabRow = ui.row()
+            for ((key, label) in views) {
+                val b = ui.button(label, state.subView(fmt) == key) { state.subView(fmt, key); booksShown = 40; genresExpanded = false; search.setText(""); redisplay?.invoke() }.apply { textSize = 13f; minimumWidth = dp(40); minHeight = dp(42); setPadding(dp(12), 0, dp(12), 0); setSingleLine(true); contentDescription = "$label tab" }
                 tabButtons[key] = b
-                tabs.addView(b, LinearLayout.LayoutParams(0, -2, if (key == "narrators") 1.25f else 1f).apply { if (key != "narrators") marginEnd = dp(6) })
+                tabRow.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
             }
+            tabs.addView(tabRow)
             body.addView(tabs)
             val chipRow = ui.row()
-            for ((key, label) in listOf("all" to "All", "ready" to "Ready", "preparing" to "Syncing", "ebook" to "Ebook only", "audio" to "Audio only", "device" to "Downloaded")) {
+            val filters = listOf("all" to "All", "both" to (if (fmt == "audio") "With ebook" else "With audiobook"), "ready" to "Synced", "preparing" to "Syncing", "only" to (if (fmt == "audio") "Audiobook only" else "Ebook only"), "device" to "Downloaded")
+            for ((key, label) in filters) {
                 val b = ui.button(label, libraryFilter == key) { libraryFilter = key; booksShown = 40; redisplay?.invoke() }.apply { minimumWidth = dp(48); textSize = 12f; minHeight = dp(36); setPadding(dp(12), 0, dp(12), 0); insetTop = 0; insetBottom = 0; contentDescription = "Filter $label" }
                 filterButtons[key] = b
                 chipRow.addView(b, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
@@ -916,26 +984,37 @@ class MainActivity : AppCompatActivity() {
         val content = ui.column(); body.addView(content)
         fun render() {
             content.removeAllViews(); syncLines.clear()
-            for ((key, b) in tabButtons) { b.isSelected = state.libraryTab == key; b.backgroundTintList = ColorStateList.valueOf(if (state.libraryTab == key) ui.selected else ui.surface); b.setTextColor(if (state.libraryTab == key) ui.onSelected else ui.ink) }
+            val view = state.subView(fmt)
+            for ((key, b) in tabButtons) { b.isSelected = view == key; b.backgroundTintList = ColorStateList.valueOf(if (view == key) ui.selected else ui.surface); b.setTextColor(if (view == key) ui.onSelected else ui.ink) }
             for ((key, b) in filterButtons) { b.isSelected = libraryFilter == key; b.backgroundTintList = ColorStateList.valueOf(if (libraryFilter == key) ui.olive else ui.surface); b.setTextColor(if (libraryFilter == key) ui.onOlive else ui.ink) }
             shelfSignature = shelfSignatureNow()
             val query = search.text.toString().trim()
-            chips.visibility = if (!home && query.isBlank() && state.libraryTab == "books") View.VISIBLE else View.GONE
+            chips.visibility = if (!home && query.isBlank() && view == "all") View.VISIBLE else View.GONE
             if (home) { renderShelf(content); return }
             if (query.isNotBlank()) { renderSearch(content, query); return }
-            when (state.libraryTab) {
-                "series" -> renderSeries(content)
-                "authors" -> renderAuthors(content)
+            when (view) {
+                "authors" -> renderAuthors(content, fmt)
                 "narrators" -> renderNarrators(content)
-                else -> renderBooks(content)
+                "series" -> renderSeries(content, fmt)
+                "genres" -> renderGenres(content, fmt)
+                else -> renderBooks(content, fmt)
             }
         }
         redisplay = { render() }
         render()
         withServerData { if (redisplay != null) render() }
+        // The list is drawn once typing pauses, not on every key; clearing the box and the keyboard's search key draw at once.
+        // A pending draw does nothing once this screen has been replaced.
+        val pendingRender = Runnable { if (redisplay != null && search.isAttachedToWindow) render() }
+        search.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        search.setOnEditorActionListener { _, _, _ -> handler.removeCallbacks(pendingRender); pendingRender.run(); false }
         search.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { librarySearch = s?.toString().orEmpty(); render() }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                librarySearch = s?.toString().orEmpty()
+                handler.removeCallbacks(pendingRender)
+                if (librarySearch.isEmpty()) render() else handler.postDelayed(pendingRender, 250)
+            }
             override fun afterTextChanged(e: android.text.Editable?) {}
         })
         if (Alignment.onDevice && getSharedPreferences("import-job", 0).contains("uris")) body.addView(button("Resume interrupted import") {
@@ -943,6 +1022,17 @@ class MainActivity : AppCompatActivity() {
             startImports(ArrayList(List(a.length()) { a.getString(it) }), prefs.getString("attach", null), true)
         })
         if (db.cleanup().isNotEmpty()) body.addView(button("Review original-file cleanup") { alert(db.cleanup().joinToString("\n\n") { it.second + "\n" + it.first }) })
+    }
+
+    /** The row along the top of Home, eBooks, Audiobooks and Journal: the mark, the name, import (on a device that aligns) and Settings. */
+    private fun masthead(): LinearLayout {
+        val mast = ui.row()
+        val night = (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+        mast.addView(ImageView(this).apply { setImageResource(if (night) R.drawable.unison_mark_dark else R.drawable.unison_mark_light); contentDescription = "Unison" }, LinearLayout.LayoutParams(dp(30), dp(30)).apply { marginEnd = dp(12) })
+        mast.addView(ui.caption("UNISON  /  READER"), LinearLayout.LayoutParams(0, -2, 1f))
+        if (Alignment.onDevice) mast.addView(ui.icon("plus", "Import files") { pick(null) })
+        mast.addView(ui.icon("settings", "Settings") { settings() })
+        return mast
     }
 
     private fun serverLine(parent: LinearLayout) {
@@ -972,10 +1062,11 @@ class MainActivity : AppCompatActivity() {
         val lastMoved = (serverShelf ?: emptyList()).associate { Server.bookId(it.work) to (it.position?.updated ?: 0L) }
         val active = begun.firstOrNull { it.id == state.active } ?: begun.maxByOrNull { lastMoved[it.id] ?: 0L }
             ?: reading.firstOrNull { it.id == state.active } ?: reading.firstOrNull()
+        heroBookId = active?.id; refreshMiniBar()
         if (active != null) {
             ui.space(content, 28); content.addView(ui.caption("CONTINUE YOUR STORY")); ui.space(content, 18)
             val hero = ui.row().apply { gravity = Gravity.TOP }
-            hero.addView(ui.cover(active, 112, 170).apply { elevation = dp(3).toFloat(); setOnClickListener { details(active) } })
+            hero.addView(ui.cover(active, 112, 170, Gravity.TOP, fitHeight = true).apply { elevation = dp(3).toFloat(); setOnClickListener { details(active) } })
             val info = ui.column().apply { setPadding(dp(20), dp(3), 0, 0) }
             info.addView(ui.text(active.title, 23f, true).apply { maxLines = 3; ellipsize = android.text.TextUtils.TruncateAt.END })
             ui.space(info, 10); info.addView(ui.text(active.author, 13f).apply { setTextColor(ui.muted) })
@@ -989,7 +1080,7 @@ class MainActivity : AppCompatActivity() {
             ui.space(info, 14)
             info.addView(ui.text(if (active.tracks.isNotEmpty() && active.passages.isNotEmpty()) "EBOOK  +  AUDIO" else if (active.tracks.isNotEmpty()) "AUDIOBOOK" else "EBOOK", 10f).apply { letterSpacing = .08f; setTextColor(ui.olive) })
             ui.space(info, 6)
-            info.addView(ui.text(shelfLine(active), 12f).apply { setTextColor(ui.muted); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+            info.addView(ui.text(shortLine(active), 12f).apply { setTextColor(ui.muted); maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END })
             hero.addView(info, LinearLayout.LayoutParams(0, -2, 1f)); content.addView(hero)
             ui.space(content, 22)
             val actions = ui.row()
@@ -1012,18 +1103,35 @@ class MainActivity : AppCompatActivity() {
         }
         if (state.serverUrl.isNotBlank()) {
             ui.space(content, 22)
-            val line = ui.text("Your reading & listening  ›", 13f).apply { setTextColor(ui.olive); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Your statistics"; setOnClickListener { statsScreen() } }
-            content.addView(line)
-            statsLine?.let { line.text = it }
+            val statsRow = ui.row().apply { minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Your statistics"; setOnClickListener { statsScreen() } }
+            val line = ui.text("Your reading & listening", 13f).apply { setTextColor(ui.olive) }
+            statsRow.addView(line, LinearLayout.LayoutParams(0, -2, 1f))
+            statsRow.addView(ui.icon("chevron", "Your statistics", ui.olive) { statsScreen() })
+            content.addView(statsRow)
+            // One line when it fits at 11-13 sp; otherwise it wraps, and only at a separator (the segments hold no-break spaces).
+            fun showStats(text: String) {
+                line.text = text; line.textSize = statsFit?.takeIf { it.first == text }?.second ?: 13f
+                line.post {
+                    val room = line.width - line.paddingLeft - line.paddingRight
+                    if (room <= 0) return@post
+                    val paint = android.text.TextPaint(line.paint)
+                    var sp = 13f
+                    while (sp > 11f) { paint.textSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP, sp, resources.displayMetrics); if (paint.measureText(text) <= room) break; sp -= .5f }
+                    line.textSize = sp.coerceAtLeast(11f); statsFit = text to sp.coerceAtLeast(11f)
+                }
+            }
+            statsLine?.let { showStats(it) }
             // Shown at once from the last answer, and asked for again once that is a minute old.
             if (statsLine == null || SystemClock.elapsedRealtime() - statsLineAt > 60_000) kotlin.concurrent.thread {
                 statsLineAt = SystemClock.elapsedRealtime()
                 val text = runCatching {
                     Server.flushSessions(this); val r = Server.client(state)!!.stats(); val week = r.getJSONObject("week")
-                    "This week  ·  ${clockish(week.getLong("listenMs"))} listening  ·  ${clockish(week.getLong("readMs"))} reading" + (if (r.optInt("streak") > 0) "  ·  ${r.optInt("streak")}-day streak" else "") + "  ›"
+                    val segments = listOf("This week", "${clockish(week.getLong("listenMs"))} listening", "${clockish(week.getLong("readMs"))} reading") + (if (r.optInt("streak") > 0) listOf("${r.optInt("streak")}-day streak") else emptyList())
+                    // No-break spaces inside a segment, and the dot stays with the segment before it: a wrap can only fall between segments.
+                    segments.mapIndexed { i, s -> s.replace(' ', '\u00A0') + if (i < segments.lastIndex) "\u00A0\u00A0·" else "" }.joinToString("  ")
                 }.getOrNull() ?: return@thread
                 statsLine = text
-                runOnUiThread { if (line.isAttachedToWindow) line.text = text }
+                runOnUiThread { if (line.isAttachedToWindow) showStats(text) }
             }
         }
         // Shelved on another device and not here yet; they count, and the shelf view brings them over.
@@ -1033,12 +1141,12 @@ class MainActivity : AppCompatActivity() {
         val finishedCount = finished.size + finishedElsewhere.size
         // The shelf itself is its own screen; here, one row into it.
         if (inProgress == 0 && finishedCount == 0) {
-            // An empty shelf still leads to My shelf when a server is connected: Lists and the wanted list live there.
+            // An empty shelf still leads to My shelf when a server is connected.
             if (state.serverUrl.isNotBlank()) sectionHead(content, "ON MY SHELF", 0, trailing = ui.icon("chevron", "Open my shelf", ui.muted) { shelfPage() }) { shelfPage() }
             else sectionHead(content, "ON MY SHELF", 0)
-            content.addView(ui.text("Nothing here yet. Browse Books, Series or Authors and add what you want to read next; it waits for you here.", 14f).apply { setTextColor(ui.muted); setLineSpacing(dp(3).toFloat(), 1f) })
+            content.addView(ui.text("Nothing here yet. Browse eBooks or Audiobooks and add what you want to read next; it waits for you here.", 14f).apply { setTextColor(ui.muted); setLineSpacing(dp(3).toFloat(), 1f) })
             ui.space(content, 14)
-            content.addView(ui.button("Browse the library", true) { goLibrary() }, LinearLayout.LayoutParams(-2, -2))
+            content.addView(ui.button("Browse the library", true) { goSection("ebooks") }, LinearLayout.LayoutParams(-2, -2))
         } else {
             ui.space(content, 22)
             val row = ui.row().apply { setPadding(0, dp(10), 0, dp(10)); isClickable = true; contentDescription = "Open my shelf"; setOnClickListener { shelfPage() } }
@@ -1052,6 +1160,17 @@ class MainActivity : AppCompatActivity() {
             content.addView(row)
         }
         serverLine(content)
+    }
+
+    /** Progress of a book shelved on another device, from the place the server holds: by sentences, else by audio. */
+    private fun elsewherePercent(w: ServerClient.Work, pos: ServerClient.Position?): String {
+        val pct = when {
+            pos == null -> 0L
+            w.hasEbook && w.passages > 0 && pos.passage > 0 -> pos.passage * 100L / w.passages
+            w.duration > 0 -> pos.audio * 100 / w.duration
+            else -> 0L
+        }
+        return "${pct.coerceIn(0, 100)}%"
     }
 
     /** My shelf as a wall of covers: what I am reading, then what I have finished. Tap opens, long-press for options. */
@@ -1084,14 +1203,11 @@ class MainActivity : AppCompatActivity() {
         val upNext = nextInSeries(serverSeriesProgress).map { Server.bookId(it.first.id) }.toSet()
         val inProgress = reading.filter { it.id !in upNext }.map { Entry(it, serverWorks?.firstOrNull { w -> Server.bookId(w.id) == it.id }) } + elsewhere.filter { Server.bookId(it.id) !in upNext }.map { Entry(null, it) }
         body.addView(ui.text("My shelf", 34f, true)); ui.space(body, 6)
-        val highlightsLink = if (local.any { state.marks(it.id).length() > 0 } || state.serverUrl.isNotBlank()) ui.text("My highlights  ›", 14f).apply { setTextColor(ui.olive); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "My highlights"; setOnClickListener { allMarksScreen() } } else null
         val finishedCount = finished.size + (serverShelf ?: emptyList()).count { e -> e.state == "finished" && local.none { it.id == Server.bookId(e.work) } && serverWorks?.any { it.id == e.work } == true }
         body.addView(ui.text("${inProgress.size} ${if (inProgress.size == 1) "book" else "books"} in progress" +(if (finishedCount > 0) "  ·  $finishedCount finished" else ""), 14f).apply { setTextColor(ui.muted) })
-        highlightsLink?.let { body.addView(it) }
-        if (state.serverUrl.isNotBlank()) body.addView(ui.text("Lists  ›", 14f).apply { setTextColor(ui.olive); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Lists"; setOnClickListener { listsScreen() } })
         ui.space(body, 10)
-        if (inProgress.isEmpty()) { ui.space(body, 12); body.addView(ui.text("Nothing on the shelf. Add books from Books, Series or Authors.", 14f).apply { setTextColor(ui.muted) }) }
-        else grid(body, inProgress) { e -> val b = e.book; when { b == null -> "On another device"; b.passages.isNotEmpty() -> "${state.passage(b.id) * 100 / b.passages.size}%"; b.duration > 0 -> "${(state.audio(b.id) * 100 / b.duration).toInt()}%"; else -> "" } }
+        if (inProgress.isEmpty()) { ui.space(body, 12); body.addView(ui.text("Nothing on the shelf. Add books from eBooks or Audiobooks.", 14f).apply { setTextColor(ui.muted) }) }
+        else grid(body, inProgress) { e -> val b = e.book; when { b == null -> elsewherePercent(e.work!!, serverShelf?.firstOrNull { it.work == e.work.id }?.position); b.passages.isNotEmpty() -> "${state.passage(b.id) * 100 / b.passages.size}%"; b.duration > 0 -> "${(state.audio(b.id) * 100 / b.duration).toInt()}%"; else -> "" } }
         // A finished book in a series offers the next one; fetched fresh, since a book may have just been finished.
         val nextBox = ui.column(); body.addView(nextBox)
         fun showNext(progress: List<ServerClient.SeriesProgress>?) {
@@ -1129,59 +1245,140 @@ class MainActivity : AppCompatActivity() {
         body.addView(ui.text("Long-press a cover for its options, including Remove from my shelf.", 12f).apply { setTextColor(ui.muted) })
     }
 
-    /** The whole collection with filter chips. */
-    private fun renderBooks(content: LinearLayout) {
-        val all = entries()
+    // ---- Formats: eBooks and Audiobooks are two views of one collection. A book with both shows in both.
+    private fun sectionName(fmt: String) = if (fmt == "audio") "Audiobooks" else "eBooks"
+    private fun otherFmt(fmt: String) = if (fmt == "audio") "ebook" else "audio"
+    /** A route's argument starts with the format ("ebook" or "audio") of the section a person, series or genre page belongs to. */
+    private fun formatOf(arg: String) = arg.substringBefore(':').takeIf { it == "ebook" || it == "audio" }
+    private fun unformat(arg: String) = if (formatOf(arg) != null) arg.substringAfter(':') else arg
+    private fun hasFormat(w: ServerClient.Work, fmt: String) = if (fmt == "audio") w.hasAudio else w.hasEbook
+    private fun worksIn(fmt: String) = serverWorks.orEmpty().filter { hasFormat(it, fmt) }
+    private fun authorsOf(w: ServerClient.Work) = w.authors.ifEmpty { listOf(w.author) }.filter { it.isNotBlank() }
+    /** Where a person, series or genre opens: the section last used when the book (or the person) has both formats, else the one it has. */
+    private fun pickFormat(inEbook: Boolean, inAudio: Boolean) = when { inAudio && !inEbook -> "audio"; inEbook && !inAudio -> "ebook"; else -> state.lastFormat }
+    private fun authorFmt(name: String) = serverWorks.orEmpty().filter { w -> authorsOf(w).any { it.equals(name, true) } }.let { ws -> pickFormat(ws.any { it.hasEbook }, ws.any { it.hasAudio }) }
+    private fun seriesFmt(name: String) = serverWorks.orEmpty().filter { w -> w.series.any { it.name.equals(name, true) } }.let { ws -> pickFormat(ws.any { it.hasEbook }, ws.any { it.hasAudio }) }
+
+    /** The authors with a book in this format, by family name, each with how many books and how many of those are synced. */
+    private fun authorList(fmt: String): List<ServerClient.PersonSummary> {
+        val counts = HashMap<String, IntArray>()
+        for (w in worksIn(fmt)) for (a in authorsOf(w)) { val c = counts.getOrPut(a) { IntArray(2) }; c[0]++; if (w.shelf == "ready") c[1]++ }
+        return counts.map { (name, c) -> ServerClient.PersonSummary(name, c[0], c[1]) }.sortedWith(compareBy({ it.name.substringAfterLast(' ').lowercase() }, { it.name.lowercase() }))
+    }
+
+    /** The series with a book in this format. */
+    private fun seriesList(fmt: String): List<ServerClient.SeriesSummary> {
+        val groups = LinkedHashMap<String, MutableList<ServerClient.Work>>()
+        for (w in worksIn(fmt)) for (s in w.series) groups.getOrPut(s.name) { ArrayList() }.add(w)
+        return groups.map { (name, ws) -> ServerClient.SeriesSummary(name, ws.size, ws.count { it.shelf == "ready" }, ws.sumOf { it.duration }, ws.flatMap { authorsOf(it) }.distinct().take(3), null) }.sortedBy { it.name.lowercase() }
+    }
+
+    /** One section's whole collection with filter chips: every book that has this format. */
+    private fun renderBooks(content: LinearLayout, fmt: String) {
+        val every = entries()
+        val all = every.filter { it.has(fmt) }
+        val other = otherFmt(fmt)
+        val filter = if (libraryFilter in setOf("all", "both", "ready", "preparing", "only", "device")) libraryFilter else "all"
         val shown = all.filter { e ->
-            when (libraryFilter) {
+            when (filter) {
                 "ready" -> e.ready
                 "preparing" -> (e.book != null && readiness(e.book) == Readiness.PREPARING) || (e.work?.shelf == "preparing")
-                "ebook" -> if (e.book != null) e.book.tracks.isEmpty() && e.book.passages.isNotEmpty() else e.work!!.hasEbook && !e.work.hasAudio
-                "audio" -> if (e.book != null) e.book.passages.isEmpty() && e.book.tracks.isNotEmpty() else e.work!!.hasAudio && !e.work.hasEbook
+                "both" -> e.has(other)
+                "only" -> !e.has(other)
                 // Everything the book has is on this phone: the text always is once a book is added; the audio only when it was downloaded (or imported here).
                 "device" -> e.book != null && (e.book.tracks.isEmpty() || state.serverWork(e.book.id) == null || state.serverDownloaded(e.book.id))
-                "finished" -> e.finished
                 else -> true
             }
         }
-        sectionHead(content, when (libraryFilter) { "all" -> "EVERYTHING"; "ready" -> "READY TO READ & LISTEN"; "preparing" -> "GETTING READY"; "ebook" -> "EBOOK ONLY"; "audio" -> "AUDIOBOOK ONLY"; "device" -> "DOWNLOADED"; else -> "FINISHED" }, shown.size)
-        if (shown.isEmpty()) content.addView(ui.text(if (all.isEmpty()) if (Alignment.onDevice) "No books yet. Import one, or connect to your server." else "No books yet. Connect to your server in Settings." else if (libraryFilter == "device") "Nothing is downloaded. A book with audio streams from your server until you choose Download on its page (On this device)." else "Nothing matches this filter.", 14f).apply { setTextColor(ui.muted) })
+        sectionHead(content, when (filter) { "all" -> "EVERYTHING"; "ready" -> "READY TO READ & LISTEN"; "preparing" -> "GETTING READY"; "both" -> if (fmt == "audio") "WITH EBOOK" else "WITH AUDIOBOOK"; "only" -> if (fmt == "audio") "AUDIOBOOK ONLY" else "EBOOK ONLY"; else -> "DOWNLOADED" }, shown.size)
+        if (shown.isEmpty()) content.addView(ui.text(when {
+            every.isEmpty() -> if (Alignment.onDevice) "No books yet. Import one, or connect to your server." else "No books yet. Connect to your server in Settings."
+            filter == "device" -> "Nothing is downloaded. A book with audio streams from your server until you choose Download on its page (On this device)."
+            all.isEmpty() -> if (fmt == "audio") "No audiobooks in the library yet." else "No ebooks in the library yet."
+            else -> "Nothing matches this filter."
+        }, 14f).apply { setTextColor(ui.muted) })
         // Long lists arrive in pages: a thousand rows at once stalls the screen.
         for (e in shown.take(booksShown)) entryRow(content, e, live = e.book != null && readiness(e.book) == Readiness.PREPARING)
         if (shown.size > booksShown) { ui.space(content, 10); content.addView(ui.button("Show ${minOf(60, shown.size - booksShown)} more of ${shown.size}", false) { booksShown += 60; redisplay?.invoke() }, LinearLayout.LayoutParams(-2, -2)) }
         serverLine(content)
     }
 
-    private fun renderSeries(content: LinearLayout) {
-        val list = serverSeriesList
+    private fun renderSeries(content: LinearLayout, fmt: String) {
         serverLine(content)
-        if (list == null) return
+        if (serverWorks == null) return
+        val list = seriesList(fmt)
         sectionHead(content, "SERIES", list.size, unit = "series")
         for (s in list) {
-            val row = ui.row().apply { setPadding(0, dp(10), 0, dp(10)); isClickable = true; contentDescription = "Open series ${s.name}"; setOnClickListener { seriesPage(s.name) } }
+            val row = ui.row().apply { setPadding(0, dp(10), 0, dp(10)); isClickable = true; contentDescription = "Open series ${s.name}"; setOnClickListener { seriesPage(s.name, fmt) } }
             val info = ui.column()
             info.addView(ui.text(s.name, 18f, true).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
             ui.space(info, 4)
-            info.addView(ui.text(listOfNotNull(s.authors.joinToString(", ").ifBlank { "Various authors" }, "${s.works} ${if (s.works == 1) "book" else "books"}", "${s.ready} synced".takeIf { s.ready > 0 }, "${s.duration / 3600000} h of audio".takeIf { s.duration > 0 }).joinToString("  ·  "), 12f).apply { setTextColor(ui.muted); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
+            info.addView(ui.text(listOfNotNull(s.authors.joinToString(", ").ifBlank { "Various authors" }, "${s.works} ${if (s.works == 1) "book" else "books"}", "${s.ready} synced".takeIf { s.ready > 0 }, "${s.duration / 3600000} h of audio".takeIf { fmt == "audio" && s.duration > 0 }).joinToString("  ·  "), 12f).apply { setTextColor(ui.muted); maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END })
             row.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
-            row.addView(ui.icon("chevron", "Open series ${s.name}", ui.muted) { seriesPage(s.name) })
+            row.addView(ui.icon("chevron", "Open series ${s.name}", ui.muted) { seriesPage(s.name, fmt) })
             content.addView(row)
         }
     }
 
-    private fun renderAuthors(content: LinearLayout) {
-        val list = serverAuthorsList
+    private fun renderAuthors(content: LinearLayout, fmt: String) {
         serverLine(content)
-        if (list == null) return
+        if (serverWorks == null) return
+        val list = authorList(fmt)
         sectionHead(content, "AUTHORS", list.size, unit = "author")
         var letter = ""
         for (a in list) {
             val initial = a.name.substringAfterLast(' ').take(1).uppercase()
             if (initial != letter) { letter = initial; ui.space(content, 10); content.addView(ui.caption(letter)); ui.space(content, 4) }
-            val row = ui.row().apply { setPadding(0, dp(8), 0, dp(8)); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Open author ${a.name}"; setOnClickListener { authorPage(a.name) } }
+            val row = ui.row().apply { setPadding(0, dp(8), 0, dp(8)); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Open author ${a.name}"; setOnClickListener { authorPage(a.name, fmt) } }
             row.addView(ui.text(a.name, 16f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }, LinearLayout.LayoutParams(0, -2, 1f))
             row.addView(ui.text("${a.works}${if (a.ready > 0) " · ${a.ready} synced" else ""}", 12f).apply { setTextColor(ui.muted) })
             content.addView(row)
+        }
+    }
+
+    /** The genres of this format: the main ones as rows, then one row that shows the rest in alphabetical order. Genres come from the server. */
+    private fun renderGenres(content: LinearLayout, fmt: String) {
+        val client = Server.client(state)
+        if (client == null) {
+            ui.space(content, 24)
+            content.addView(ui.text("Genres come from a server library.", 13f).apply { setTextColor(ui.muted) })
+            return
+        }
+        val now = SystemClock.elapsedRealtime()
+        val cached = genreCache[fmt]
+        // Asked for once a minute at most; a failed answer is not asked for again at once either.
+        val last = genreFetched[fmt]
+        if (last == null || now - last > 60_000) {
+            genreFetched[fmt] = now
+            val generation = libraryGeneration
+            kotlin.concurrent.thread {
+                val r = runCatching { client.genres(fmt) }
+                runOnUiThread {
+                    r.onSuccess { genreCache[fmt] = it; genreError = null }.onFailure { genreError = it.message ?: it.javaClass.simpleName }
+                    if (generation == libraryGeneration && redisplay != null) redisplay?.invoke()
+                }
+            }
+        }
+        if (cached == null) {
+            ui.space(content, 24)
+            content.addView(ui.text(if (genreError != null) "This server does not list genres yet, or could not be reached." else "Loading…", 13f).apply { setTextColor(ui.muted) })
+            return
+        }
+        val main = cached.filter { it.main }
+        val head = main.ifEmpty { cached }
+        val rest = if (main.isEmpty()) emptyList() else cached.filter { !it.main }.sortedBy { it.name.lowercase() }
+        sectionHead(content, "GENRES", head.size + (if (genresExpanded) rest.size else 0), unit = if (rest.isNotEmpty() && !genresExpanded) "main genre" else "genre")
+        if (cached.isEmpty()) content.addView(ui.text("No genres are recorded for these books.", 14f).apply { setTextColor(ui.muted) })
+        fun genreRow(g: ServerClient.GenreSummary) {
+            val row = ui.row().apply { setPadding(0, dp(8), 0, dp(8)); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Open genre ${g.name}"; setOnClickListener { genrePage(g.name, fmt) } }
+            row.addView(ui.text(g.name, 16f).apply { maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END }, LinearLayout.LayoutParams(0, -2, 1f))
+            row.addView(ui.text("${g.works}", 12f).apply { setTextColor(ui.muted) })
+            content.addView(row)
+        }
+        for (g in head) genreRow(g)
+        if (rest.isNotEmpty()) {
+            if (genresExpanded) for (g in rest) genreRow(g)
+            else content.addView(ui.text("Show all ${cached.size} genres", 14f).apply { setTextColor(ui.olive); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Show all ${cached.size} genres"; setOnClickListener { genresExpanded = true; redisplay?.invoke() } })
         }
     }
 
@@ -1198,7 +1395,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderNarrators(content: LinearLayout) {
         serverLine(content)
-        val list = narratorList()
+        val list = narratorList(entries().filter { it.hasAudio })
         if (list.isEmpty() && serverWorks == null && Server.client(state) != null) return
         sectionHead(content, "NARRATORS", list.size, unit = "narrator")
         if (list.isEmpty()) content.addView(ui.text("No audiobook here names its narrator.", 14f).apply { setTextColor(ui.muted) })
@@ -1213,17 +1410,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** A narrator: everything they read, series first and in order, then the other titles. */
+    /** A narrator (always in Audiobooks): everything they read, series first and in order, then the other titles. */
     private fun narratorPage(name: String) {
         arrive("narrator:$name")
+        state.lastFormat = "audio"
         current = null
         val body = screen("")
-        pageHeader(body, "NARRATOR") { state.libraryTab = "narrators"; library() }
+        pageHeader(body, "NARRATOR") { backToSection("audio", "narrators") }
         body.addView(ui.text(name, 28f, true).apply { maxLines = 2 })
         val list = ui.column(); body.addView(list)
         fun render() {
             list.removeAllViews()
-            val books = entries().filter { e -> narratorsOf(e).any { it.equals(name, true) } }
+            val books = entries().filter { e -> e.hasAudio && narratorsOf(e).any { it.equals(name, true) } }
                 .sortedWith(compareBy<Entry>({ it.series.firstOrNull() == null }, { it.series.firstOrNull()?.name?.lowercase().orEmpty() }, { it.series.firstOrNull()?.sequence ?: Double.MAX_VALUE }, { it.title.lowercase() }))
             if (books.isEmpty()) {
                 ui.space(list, 16)
@@ -1245,6 +1443,7 @@ class MainActivity : AppCompatActivity() {
         withServerData { if (trail.lastOrNull() == "narrator:$name" && list.parent != null) render() }
     }
 
+    /** Search covers the whole library, both formats. A person, series or genre found opens in the section last used, or in the format it has when it lacks the other. */
     private fun renderSearch(content: LinearLayout, query: String) {
         val q = query.lowercase()
         val all = entries()
@@ -1252,8 +1451,8 @@ class MainActivity : AppCompatActivity() {
         val series = serverSeriesList?.filter { it.name.lowercase().contains(q) } ?: emptyList()
         val authors = serverAuthorsList?.filter { it.name.lowercase().contains(q) } ?: emptyList()
         val narrators = narratorList(all).filter { it.name.lowercase().contains(q) }
-        if (series.isNotEmpty()) { sectionHead(content, "SERIES"); for (s in series.take(6)) content.addView(ui.button("${s.name}  ·  ${s.works}", false) { seriesPage(s.name) }, LinearLayout.LayoutParams(-2, -2)) }
-        if (authors.isNotEmpty()) { sectionHead(content, "AUTHORS"); for (a in authors.take(6)) content.addView(ui.button("${a.name}  ·  ${a.works}", false) { authorPage(a.name) }, LinearLayout.LayoutParams(-2, -2)) }
+        if (series.isNotEmpty()) { sectionHead(content, "SERIES"); for (s in series.take(6)) content.addView(ui.button("${s.name}  ·  ${s.works}", false) { seriesPage(s.name, seriesFmt(s.name)) }, LinearLayout.LayoutParams(-2, -2)) }
+        if (authors.isNotEmpty()) { sectionHead(content, "AUTHORS"); for (a in authors.take(6)) content.addView(ui.button("${a.name}  ·  ${a.works}", false) { authorPage(a.name, authorFmt(a.name)) }, LinearLayout.LayoutParams(-2, -2)) }
         if (narrators.isNotEmpty()) { sectionHead(content, "NARRATORS"); for (n in narrators.take(6)) content.addView(ui.button("${n.name}  ·  ${n.works}", false) { narratorPage(n.name) }, LinearLayout.LayoutParams(-2, -2)) }
         sectionHead(content, "BOOKS", books.size)
         if (books.isEmpty()) {
@@ -1271,15 +1470,24 @@ class MainActivity : AppCompatActivity() {
         body.addView(bar); ui.space(body, 18)
     }
 
-    /** A series: its books in sequence order, each with its state and a way in. */
-    private fun seriesPage(name: String) {
-        arrive("series:$name")
+    /** The line under a person's or series' name when the same also exists in the other format: "Also 3 as audiobooks ›", which opens the same page in the other section. */
+    private fun alsoLine(parent: LinearLayout, n: Int, other: String, open: () -> Unit) {
+        if (n <= 0) return
+        val noun = if (other == "audio") (if (n == 1) "an audiobook" else "audiobooks") else (if (n == 1) "an ebook" else "ebooks")
+        parent.addView(ui.text("Also $n as $noun  ›", 14f).apply { setTextColor(ui.olive); minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Also $n as $noun"; setOnClickListener { open() } })
+    }
+
+    /** A series in one section: its books of that format in sequence order, each with its state and a way in. */
+    private fun seriesPage(name: String, fmt: String = seriesFmt(name)) {
+        arrive("series:$fmt:$name")
+        state.lastFormat = fmt
         current = null
         val body = screen("")
-        pageHeader(body, "SERIES") { state.libraryTab = "series"; library() }
+        pageHeader(body, "SERIES") { backToSection(fmt, "series") }
         body.addView(ui.text(name, 28f, true).apply { maxLines = 2 })
-        val summary = serverSeriesList?.firstOrNull { it.name == name }
-        if (summary != null) { ui.space(body, 6); body.addView(ui.text(listOf(summary.authors.joinToString(", "), "${summary.works} books", "${summary.ready} synced").filter { it.isNotBlank() }.joinToString("  ·  "), 13f).apply { setTextColor(ui.muted) }) }
+        val summaryLine = ui.text("", 13f).apply { setTextColor(ui.muted); visibility = View.GONE; setPadding(0, dp(6), 0, 0) }
+        body.addView(summaryLine)
+        val alsoBox = ui.column(); body.addView(alsoBox)
         val progressLine = ui.text("", 13f).apply { setTextColor(ui.liveText); visibility = View.GONE; setPadding(0, dp(4), 0, 0) }
         body.addView(progressLine)
         val list = ui.column(); body.addView(list)
@@ -1291,33 +1499,46 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (current != null || list.parent == null) return@runOnUiThread
                 list.removeAllViews()
-                val works = result.getOrElse { list.addView(ui.text("Could not load the series: ${it.message}", 13f).apply { setTextColor(ui.muted) }); return@runOnUiThread }
+                val every = result.getOrElse { list.addView(ui.text("Could not load the series: ${it.message}", 13f).apply { setTextColor(ui.muted) }); return@runOnUiThread }
+                val works = every.filter { hasFormat(it, fmt) }
+                summaryLine.text = listOf(works.flatMap { authorsOf(it) }.distinct().take(3).joinToString(", "), "${works.size} ${if (works.size == 1) "book" else "books"}", "${works.count { it.shelf == "ready" }} synced").filter { it.isNotBlank() }.joinToString("  ·  ")
+                summaryLine.visibility = View.VISIBLE
+                alsoLine(alsoBox, every.count { hasFormat(it, otherFmt(fmt)) }, otherFmt(fmt)) { seriesPage(name, otherFmt(fmt)) }
                 if (progress != null) serverSeriesProgress = progress
                 val p = progress?.firstOrNull { it.name.equals(name, true) }
-                if (p != null) { progressLine.text = "${p.finished} of ${p.total} finished"; progressLine.visibility = View.VISIBLE }
                 val local = db.books().associateBy { it.id }
                 val finishedHere = (serverShelf ?: emptyList()).filter { it.state == "finished" }.map { it.work }.toSet()
-                fun row(w: ServerClient.Work) {
+                // Counted among this section's own books: the server's figure covers the whole series, both formats.
+                if (p != null) { progressLine.text = "${works.count { w -> w.id in finishedHere || (local[Server.bookId(w.id)]?.let { state.finished(it.id) > 0 } == true) }} of ${works.size} finished"; progressLine.visibility = View.VISIBLE }
+                // One list in series order. After the last finished book, the one being read or, once that is finished, the next
+                // carries its state in its status line; the page opens scrolled to it.
+                val pinned = (p?.next ?: p?.current)?.let { id -> works.firstOrNull { it.id == id } }
+                ui.space(list, 10)
+                var pinnedRow: View? = null
+                for (w in works) {
                     val seq = w.series.firstOrNull { it.name.equals(name, true) }?.sequence
                     val badge = seq?.let { "#" + if (it == Math.floor(it)) it.toLong().toString() else it.toString() }
                     val e = Entry(local[Server.bookId(w.id)], w)
-                    entryRow(list, e, badge = badge, line = if (e.finished || w.id in finishedHere) "Finished" else null)
+                    val isPinned = w === pinned
+                    val line = if (e.finished || w.id in finishedHere) "Finished" else if (isPinned) (if (p?.next != null) "Next up" else "Reading now") else null
+                    val r = entryRow(list, e, badge = badge, line = line, showSeries = false, accent = isPinned && line != "Finished")
+                    if (isPinned) pinnedRow = r
                 }
-                // After the last finished book: the one being read (READING NOW) or, once that is finished, the next (NEXT UP).
-                val pinned = (p?.next ?: p?.current)?.let { id -> works.firstOrNull { it.id == id } }
-                if (pinned != null) { sectionHead(list, if (p?.next != null) "NEXT UP" else "READING NOW"); row(pinned); sectionHead(list, "ALL BOOKS", works.size) } else ui.space(list, 10)
-                for (w in works) row(w)
+                // Once, after the list is laid out: a long series opens on the right book.
+                pinnedRow?.let { r -> r.post { if (r.isAttachedToWindow) r.requestRectangleOnScreen(android.graphics.Rect(0, 0, r.width, r.height), true) } }
             }
         }
     }
 
-    /** An author: series first, in order, then standalone titles. */
-    private fun authorPage(name: String) {
-        arrive("author:$name")
+    /** An author in one section: that format's books, series first, in order, then standalone titles. */
+    private fun authorPage(name: String, fmt: String = authorFmt(name)) {
+        arrive("author:$fmt:$name")
+        state.lastFormat = fmt
         current = null
         val body = screen("")
-        pageHeader(body, "AUTHOR") { state.libraryTab = "authors"; library() }
+        pageHeader(body, "AUTHOR") { backToSection(fmt, "authors") }
         body.addView(ui.text(name, 28f, true).apply { maxLines = 2 })
+        val alsoBox = ui.column(); body.addView(alsoBox)
         val list = ui.column(); body.addView(list)
         ui.space(list, 16); list.addView(ui.text("Loading…", 13f).apply { setTextColor(ui.muted) })
         val client = Server.client(state) ?: return
@@ -1326,7 +1547,10 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 if (current != null || list.parent == null) return@runOnUiThread
                 list.removeAllViews()
-                val works = result.getOrElse { list.addView(ui.text("Could not load the author: ${it.message}", 13f).apply { setTextColor(ui.muted) }); return@runOnUiThread }
+                val every = result.getOrElse { list.addView(ui.text("Could not load the author: ${it.message}", 13f).apply { setTextColor(ui.muted) }); return@runOnUiThread }
+                val works = every.filter { hasFormat(it, fmt) }
+                alsoLine(alsoBox, every.count { hasFormat(it, otherFmt(fmt)) }, otherFmt(fmt)) { authorPage(name, otherFmt(fmt)) }
+                if (works.isEmpty()) { ui.space(list, 10); list.addView(ui.text(if (fmt == "audio") "No audiobooks by $name in the library." else "No ebooks by $name in the library.", 13f).apply { setTextColor(ui.muted) }) }
                 val local = db.books().associateBy { it.id }
                 var group: String? = "\u0000"
                 for (w in works) {
@@ -1339,11 +1563,56 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** A genre in one section: the name, how many books, and the books as the same rows as All, a page at a time. */
+    private fun genrePage(name: String, fmt: String = state.lastFormat) {
+        arrive("genre:$fmt:$name")
+        state.lastFormat = fmt
+        current = null
+        val body = screen("")
+        pageHeader(body, "GENRE") { backToSection(fmt, "genres") }
+        body.addView(ui.text(name, 28f, true).apply { maxLines = 2 })
+        val countLine = ui.text("", 13f).apply { setTextColor(ui.muted); setPadding(0, dp(6), 0, 0); visibility = View.GONE }
+        body.addView(countLine)
+        val alsoBox = ui.column(); body.addView(alsoBox)
+        val list = ui.column(); body.addView(list)
+        ui.space(list, 16); list.addView(ui.text("Loading…", 13f).apply { setTextColor(ui.muted) })
+        val client = Server.client(state) ?: return
+        // The same genre in the other section: from the cached list of that format, else one request per page open.
+        val other = otherFmt(fmt)
+        fun showAlso(all: List<ServerClient.GenreSummary>) {
+            val n = all.firstOrNull { it.name.equals(name, true) }?.works ?: 0
+            if (alsoBox.parent != null) alsoLine(alsoBox, n, other) { genrePage(name, other) }
+        }
+        genreCache[other]?.let { showAlso(it) } ?: kotlin.concurrent.thread {
+            runCatching { client.genres(other) }.onSuccess { all -> runOnUiThread { genreCache[other] = all; if (current == null) showAlso(all) } }
+        }
+        kotlin.concurrent.thread {
+            val result = runCatching { client.genreWorks(name, fmt) }
+            runOnUiThread {
+                if (current != null || list.parent == null) return@runOnUiThread
+                list.removeAllViews()
+                val works = result.getOrElse { list.addView(ui.text("This server does not list genres yet, or could not be reached.", 13f).apply { setTextColor(ui.muted) }); return@runOnUiThread }
+                val local = db.books().associateBy { it.id }
+                val rows = works.sortedBy { it.title.lowercase() }.map { Entry(local[Server.bookId(it.id)], it) }
+                countLine.text = "${rows.size} ${if (rows.size == 1) "book" else "books"}"; countLine.visibility = View.VISIBLE
+                var shown = 40
+                fun draw() {
+                    list.removeAllViews()
+                    ui.space(list, 10)
+                    for (e in rows.take(shown)) entryRow(list, e)
+                    if (rows.size > shown) { ui.space(list, 10); list.addView(ui.button("Show ${minOf(60, rows.size - shown)} more of ${rows.size}", false) { shown += 60; draw() }, LinearLayout.LayoutParams(-2, -2)) }
+                }
+                draw()
+            }
+        }
+    }
+
     /** A server work: everything known about it, and the way onto this device and the shelf. */
     private fun workDetail(work: ServerClient.Work) {
         worksSeen[work.id] = work; arrive("work:${work.id}")
         current = null
         val localBook = db.load(Server.bookId(work.id))
+        val workFmt = pickFormat(work.hasEbook, work.hasAudio)
         val body = screen("")
         pageHeader(body, "ON YOUR SERVER") { library() }
         body.addView(serverCover(work, 146, 218).apply { elevation = dp(5).toFloat() }, LinearLayout.LayoutParams(dp(146), dp(218)).apply { gravity = Gravity.CENTER_HORIZONTAL })
@@ -1352,7 +1621,7 @@ class MainActivity : AppCompatActivity() {
         if (work.subtitle.isNotBlank()) { ui.space(body, 4); body.addView(ui.text(work.subtitle, 15f).apply { gravity = Gravity.CENTER; setTextColor(ui.muted) }) }
         ui.space(body, 8)
         val authorsRow = ui.row().apply { gravity = Gravity.CENTER }
-        for ((i, a) in (work.authors.ifEmpty { listOf(work.author) }).withIndex()) authorsRow.addView(ui.text((if (i > 0) ", " else "") + a, 16f).apply { setTextColor(ui.olive); minimumHeight = dp(48); minimumWidth = dp(48); gravity = Gravity.CENTER; isClickable = true; contentDescription = "Open author $a"; setOnClickListener { authorPage(a) } })
+        for ((i, a) in (work.authors.ifEmpty { listOf(work.author) }).withIndex()) authorsRow.addView(ui.text((if (i > 0) ", " else "") + a, 16f).apply { setTextColor(ui.olive); minimumHeight = dp(48); minimumWidth = dp(48); gravity = Gravity.CENTER; isClickable = true; contentDescription = "Open author $a"; setOnClickListener { authorPage(a, workFmt) } })
         body.addView(authorsRow)
         if (work.narrators.isNotEmpty()) {
             val readBy = ui.row().apply { gravity = Gravity.CENTER }
@@ -1363,7 +1632,7 @@ class MainActivity : AppCompatActivity() {
         if (work.series.isNotEmpty()) {
             ui.space(body, 10)
             val chips = ui.row().apply { gravity = Gravity.CENTER }
-            for (s in work.series) chips.addView(ui.button(s.label, false) { seriesPage(s.name) }.apply { textSize = 12f; minHeight = dp(34); insetTop = 0; insetBottom = 0; setPadding(dp(12), 0, dp(12), 0) }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
+            for (s in work.series) chips.addView(ui.button(s.label, false) { seriesPage(s.name, workFmt) }.apply { textSize = 12f; minHeight = dp(34); insetTop = 0; insetBottom = 0; setPadding(dp(12), 0, dp(12), 0) }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
             body.addView(chips)
         }
         ui.space(body, 14)
@@ -1426,7 +1695,7 @@ class MainActivity : AppCompatActivity() {
             ui.space(body, 22)
             val wrap = ui.row()
             val scroll = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(wrap) }
-            for (g in work.genres.take(8)) wrap.addView(ui.text(g, 12f).apply { setTextColor(ui.muted); background = ui.shape(ui.surface, 10); setPadding(dp(10), dp(5), dp(10), dp(5)) }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
+            for (g in work.genres.take(8)) wrap.addView(ui.text(g, 12f).apply { setTextColor(ui.olive); minimumHeight = dp(36); gravity = Gravity.CENTER_VERTICAL; isClickable = true; contentDescription = "Open genre $g"; setOnClickListener { genrePage(g, workFmt) }; background = ui.shape(ui.surface, 10); setPadding(dp(10), dp(5), dp(10), dp(5)) }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(6) })
             body.addView(scroll)
         }
         if (work.description.isNotBlank()) {
@@ -1505,7 +1774,7 @@ class MainActivity : AppCompatActivity() {
                     column.addView(ui.text(shelfLine(book), 11f).apply {
                         setTextColor(if (live) ui.liveText else ui.muted); maxLines = 2; ellipsize = android.text.TextUtils.TruncateAt.END
                         if (paired) { isClickable = true; contentDescription = "Sync overview for ${book.title}"; setOnClickListener { syncOverview(book) } }
-                    }.also { if (live) syncLines += it to book })
+                    }.also { if (live) syncLines += Triple(it, book, false) })
                     shelfAction(book)?.let { action ->
                         ui.space(column, 8)
                         column.addView(ui.button(action.first, kind == Readiness.MISSING) { action.second() }.apply {
@@ -1638,7 +1907,7 @@ class MainActivity : AppCompatActivity() {
         // An audiobook alone has no pages: its progress is the Audiobook row below.
         if (b.passages.isNotEmpty() || state.finished(b.id) > 0) body.addView(settingRow("Reading progress", if (state.finished(b.id) > 0) "Finished on ${java.text.DateFormat.getDateInstance(java.text.DateFormat.MEDIUM).format(java.util.Date(state.finished(b.id)))}" else "${if (b.passages.isEmpty()) 0 else state.passage(b.id) * 100 / b.passages.size}% of your book", "book") { if (b.passages.isNotEmpty()) showReader(b) })
         if (b.tracks.isNotEmpty()) body.addView(settingRow("Audiobook", "${Alignment.clock(state.audio(b.id))} of ${Alignment.clock(b.duration)}" + (if (state.serverWork(b.id) != null) (if (state.serverDownloaded(b.id)) " · downloaded" else " · streaming from your server") else ""), "headphones") { playerScreen(b) })
-        body.addView(settingRow("Bookmarks & highlights", state.marks(b.id).length().let { if (it == 0) "None yet · long-press a sentence, then use the reader's menu" else "$it ${if (it == 1) "mark" else "marks"}" }, "contents") { marksScreen(b) })
+        body.addView(settingRow("Bookmarks & highlights", state.marks(b.id).length().let { if (it == 0) "None yet · long-press a sentence in the reader and choose Highlight" else "$it ${if (it == 1) "mark" else "marks"}" }, "contents") { marksScreen(b) })
         if (state.serverWork(b.id) != null) body.addView(settingRow("On this device", "${sizeText(Server.sizeOnDevice(this, b.id))}${if (b.tracks.isNotEmpty() && !state.serverDownloaded(b.id)) " · tap to download the audio for offline" else " · tap to manage"}", "plus") {
             if (b.tracks.isNotEmpty() && !state.serverDownloaded(b.id)) downloadAudioFor(b) { details(db.load(b.id) ?: b) } else downloadsScreen()
         })
@@ -1698,10 +1967,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** A mark of a server book was added, changed or removed here: recorded as owed at once, then sent (now, or when there is a connection again). */
-    private fun owe(b: Book, passage: Int, kind: String, remove: Boolean) {
+    private fun owe(b: Book, passage: Int, kind: String, remove: Boolean, settle: Boolean = true) {
         if (state.serverWork(b.id) == null) return
         state.markOwed(b.id, passage, kind, remove)
-        kotlin.concurrent.thread { Server.settle(this) }
+        if (settle) kotlin.concurrent.thread { Server.settle(this) }
     }
 
     /** Adds or removes a bookmark or highlight on a sentence, draws it, and mirrors it to the server. */
@@ -1712,6 +1981,61 @@ class MainActivity : AppCompatActivity() {
         reader?.setMarks(state.markIds(b.id, "highlight"))
         owe(b, passage, kind, had)
         note(when { had && kind == "highlight" -> "Highlight removed"; had -> "Bookmark removed"; kind == "highlight" -> "Sentence highlighted"; else -> "Page bookmarked" })
+    }
+
+    /** The selection menu's Highlight: removes the highlights when every touched sentence has one, else highlights those without. One highlight a sentence, as toggleMark stores them. */
+    private fun highlightSentences(b: Book, first: Int, last: Int) {
+        val touched = (first..last).filter { it in b.passages.indices }
+        if (touched.isEmpty()) return
+        val marked = state.markIds(b.id, "highlight").toSet()
+        val removing = touched.all { it in marked }
+        for (p in touched) {
+            if (removing) state.removeMark(b.id, p, "highlight")
+            else if (p !in marked) state.setMark(b.id, p, "highlight", "", b.passages[p].text)
+            else continue
+            owe(b, p, "highlight", removing, settle = false)
+        }
+        // Every sentence is owed by now: one upload covers them all.
+        if (state.serverWork(b.id) != null) kotlin.concurrent.thread { Server.settle(this) }
+        reader?.setMarks(state.markIds(b.id, "highlight"))
+        val count = if (removing) touched.size else touched.count { it !in marked }
+        note(when { removing -> "Highlight removed"; count == 1 -> "Sentence highlighted"; else -> "$count sentences highlighted" })
+    }
+
+    /**
+     * The note editor for a mark: a multi-line field filled with its note, Save and Cancel. An empty note removes the note,
+     * never the mark. With [commit] the caller stores the saved text itself; Cancel and dismissing store nothing.
+     */
+    private fun editMarkNote(b: Book, p: Int, kind: String, current: org.json.JSONObject?, commit: ((String) -> Unit)? = null, saved: () -> Unit = {}) {
+        val input = EditText(this).apply { setText(current?.optString("note").orEmpty()); hint = "Your note"; minLines = 2 }
+        MaterialAlertDialogBuilder(this).setTitle("Note").setView(ui.column().apply { setPadding(dp(24), dp(8), dp(24), 0); addView(input) })
+            .setPositiveButton("Save") { _, _ ->
+                val note = input.text.toString().trim()
+                if (commit != null) commit(note)
+                else {
+                    state.setMark(b.id, p, kind, note, current?.optString("text")?.ifBlank { null } ?: b.passages.getOrNull(p)?.text.orEmpty(), current?.optLong("created") ?: System.currentTimeMillis())
+                    owe(b, p, kind, false)
+                }
+                saved()
+            }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    /** The selection menu's Note: the editor opens first; Save highlights the sentences not yet highlighted, keeps the note on the first one and uploads once. Cancel stores nothing. */
+    private fun noteSentences(b: Book, first: Int, last: Int) {
+        val touched = (first..last).filter { it in b.passages.indices }
+        if (touched.isEmpty()) return
+        val at = touched.first()
+        val all = state.marks(b.id)
+        val existing = (0 until all.length()).map { all.getJSONObject(it) }.firstOrNull { it.getInt("passage") == at && it.getString("kind") == "highlight" }
+        editMarkNote(b, at, "highlight", existing, commit = { note ->
+            val marked = state.markIds(b.id, "highlight").toSet()
+            for (p in touched.filter { it !in marked && it != at }) { state.setMark(b.id, p, "highlight", "", b.passages[p].text); owe(b, p, "highlight", false, settle = false) }
+            state.setMark(b.id, at, "highlight", note, existing?.optString("text")?.ifBlank { null } ?: b.passages[at].text, existing?.optLong("created") ?: System.currentTimeMillis())
+            owe(b, at, "highlight", false, settle = false)
+            reader?.setMarks(state.markIds(b.id, "highlight"))
+            if (state.serverWork(b.id) != null) kotlin.concurrent.thread { Server.settle(this) }
+        })
     }
 
     /** A book's bookmarks and highlights: tap to go there, add a note, or remove. */
@@ -1726,7 +2050,7 @@ class MainActivity : AppCompatActivity() {
             list.removeAllViews()
             val a = state.marks(b.id)
             val marks = (0 until a.length()).map { a.getJSONObject(it) }.sortedBy { it.getInt("passage") }
-            if (marks.isEmpty()) { ui.space(list, 16); list.addView(ui.text("Nothing marked yet. In the reader, long-press a sentence and use the ⋯ menu to highlight it, or bookmark the page you are on.", 14f).apply { setTextColor(ui.muted); setLineSpacing(dp(3).toFloat(), 1f) }); return }
+            if (marks.isEmpty()) { ui.space(list, 16); list.addView(ui.text("Nothing marked yet. In the reader, long-press a sentence and choose Highlight, or bookmark the page you are on from the ⋯ menu.", 14f).apply { setTextColor(ui.muted); setLineSpacing(dp(3).toFloat(), 1f) }); return }
             ui.space(list, 10)
             list.addView(ui.button("Share as Markdown", false) { shareMarkdown("${b.title} - highlights", marksMarkdown(b)) }, LinearLayout.LayoutParams(-2, -2))
             for (kind in listOf("bookmark", "highlight")) {
@@ -1745,10 +2069,7 @@ class MainActivity : AppCompatActivity() {
                     ui.space(row, 8)
                     val actions = ui.row()
                     actions.addView(ui.button(if (m.optString("note").isBlank()) "Add a note" else "Edit note", false) {
-                        val input = EditText(this).apply { setText(m.optString("note")); hint = "Your note"; minLines = 2 }
-                        MaterialAlertDialogBuilder(this).setTitle("Note").setView(ui.column().apply { setPadding(dp(24), dp(8), dp(24), 0); addView(input) })
-                            .setPositiveButton("Save") { _, _ -> state.setMark(b.id, p, kind, input.text.toString().trim(), m.optString("text"), m.optLong("created")); owe(b, p, kind, false); render() }
-                            .setNegativeButton("Cancel", null).show()
+                        editMarkNote(b, p, kind, m, saved = { render() })
                     }.apply { textSize = 12f; minHeight = dp(36); insetTop = 0; insetBottom = 0 }, LinearLayout.LayoutParams(-2, -2).apply { marginEnd = dp(8) })
                     actions.addView(ui.button("Remove", false) { state.removeMark(b.id, p, kind); owe(b, p, kind, true); render() }.apply { textSize = 12f; minHeight = dp(36); insetTop = 0; insetBottom = 0 }, LinearLayout.LayoutParams(-2, -2))
                     row.addView(actions)
@@ -1831,7 +2152,7 @@ class MainActivity : AppCompatActivity() {
         arrive("allMarks")
         current = null
         val body = screen("")
-        pageHeader(body, "MY SHELF") { shelfPage() }
+        pageHeader(body, "JOURNAL") { journalScreen() }
         body.addView(ui.text("Highlights", 34f, true)); ui.space(body, 6)
         val summary = ui.text("", 14f).apply { setTextColor(ui.muted) }; body.addView(summary)
         val list = ui.column(); body.addView(list)
@@ -1846,7 +2167,7 @@ class MainActivity : AppCompatActivity() {
                 val a = w.getJSONArray("marks"); Group(w.getString("title"), w.optString("author"), w.optInt("passages"), (0 until a.length()).map { a.getJSONObject(it) }, null, w.getString("work"))
             }
             val groups = (local + away).filter { it.marks.isNotEmpty() }.sortedByDescending { g -> g.marks.maxOf { it.optLong("created") } }
-            if (groups.isEmpty()) { summary.text = "Nothing marked yet. In a book, long-press a sentence and use the reader's ⋯ menu."; return }
+            if (groups.isEmpty()) { summary.text = "Nothing marked yet. In the reader, long-press a sentence and choose Highlight, or bookmark the page you are on from the ⋯ menu."; return }
             val all = groups.flatMap { it.marks }; val highlights = all.count { it.getString("kind") == "highlight" }
             summary.text = "$highlights ${if (highlights == 1) "highlight" else "highlights"}  ·  ${all.size - highlights} ${if (all.size - highlights == 1) "bookmark" else "bookmarks"}  ·  ${groups.size} ${if (groups.size == 1) "book" else "books"}"
             ui.space(list, 10)
@@ -1893,7 +2214,7 @@ class MainActivity : AppCompatActivity() {
             c == '‘' || c == '’' || c == 'ʼ' -> '\''
             c == '“' || c == '”' -> '"'
             c == '–' || c == '—' -> '-'
-            c == ' ' || c.isWhitespace() -> ' '
+            c == '\u00A0' || c.isWhitespace() -> ' '
             c.code < 128 -> c.lowercaseChar()
             else -> java.text.Normalizer.normalize(c.toString(), java.text.Normalizer.Form.NFD)[0].lowercaseChar()
         })
@@ -2268,15 +2589,37 @@ class MainActivity : AppCompatActivity() {
             progressTintList = ColorStateList.valueOf(ui.olive); thumbTintList = ColorStateList.valueOf(ui.olive)
         }
         var dragging = false
+        // With chapters the bar spans the chapter being played, one step a second; otherwise the whole book in 1000 steps.
+        val byChapter = b.chapters.size > 1
+        var spanStart = 0L; var spanEnd = b.duration
+        // Chapter i runs to the start of the next (the last to the book's end); before the first chapter, from 0 to its start.
+        fun spanAt(position: Long): Pair<Long, Long> {
+            val i = b.chapters.indexOfLast { it.start <= position }
+            return if (i < 0) 0L to b.chapters[0].start else b.chapters[i].start to (b.chapters.getOrNull(i + 1)?.start ?: b.duration)
+        }
+        fun showSpan(position: Long) {
+            val (s, e) = spanAt(position)
+            val steps = ((e - s) / 1000).toInt().coerceAtLeast(1)
+            if (s != spanStart || e != spanEnd || seek.max != steps) { spanStart = s; spanEnd = e; seek.max = steps; total.text = Alignment.clock((e - s).coerceAtLeast(0)) }
+        }
+        if (byChapter) showSpan(now())
         seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onStartTrackingTouch(s: SeekBar) { dragging = true }
-            override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) { if (user) elapsed.text = Alignment.clock(p * b.duration / 1000) }
-            override fun onStopTrackingTouch(s: SeekBar) { PlaybackService.send(this@MainActivity, "seek", b.id, s.progress * b.duration / 1000); dragging = false }
+            override fun onProgressChanged(s: SeekBar, p: Int, user: Boolean) { if (user) elapsed.text = Alignment.clock(if (byChapter) p * 1000L else p * b.duration / 1000) }
+            override fun onStopTrackingTouch(s: SeekBar) {
+                val target = if (byChapter) (spanStart + s.progress * 1000L).coerceAtMost(spanEnd) else s.progress * b.duration / 1000
+                PlaybackService.send(this@MainActivity, "seek", b.id, target); dragging = false
+            }
         })
         body.addView(seek, LinearLayout.LayoutParams(-1, dp(46)))
         val times = ui.row()
-        times.addView(elapsed, LinearLayout.LayoutParams(0, -2, 1f)); times.addView(left); times.addView(total, LinearLayout.LayoutParams(0, -2, 1f))
-        body.addView(times); ui.space(body, 18)
+        // With chapters: time into the chapter and its length; the book's own times are one muted line below.
+        val bookLine = ui.text("", 12f).apply { setTextColor(ui.muted); gravity = Gravity.CENTER; maxLines = 1; setSingleLine(true); ellipsize = end }
+        if (byChapter) { total.gravity = Gravity.END; times.addView(elapsed, LinearLayout.LayoutParams(0, -2, 1f)); times.addView(total, LinearLayout.LayoutParams(0, -2, 1f)) }
+        else { times.addView(elapsed, LinearLayout.LayoutParams(0, -2, 1f)); times.addView(left); times.addView(total, LinearLayout.LayoutParams(0, -2, 1f)) }
+        body.addView(times)
+        if (byChapter) { ui.space(body, 4); body.addView(bookLine) }
+        ui.space(body, 18)
         val controls = ui.row().apply { gravity = Gravity.CENTER }
         val skips = b.chapters.size > 1
         // Previous chapter: the start of this one, or of the one before when this one has only just begun.
@@ -2313,10 +2656,14 @@ class MainActivity : AppCompatActivity() {
             override fun run() {
                 if (playerUpdate !== this) return
                 val position = now()
-                if (!dragging) { elapsed.text = Alignment.clock(position); seek.progress = if (b.duration > 0) (position * 1000 / b.duration).toInt() else 0 }
+                if (!dragging) {
+                    if (byChapter) { showSpan(position); elapsed.text = Alignment.clock((position - spanStart).coerceAtLeast(0)); seek.progress = ((position - spanStart).coerceAtLeast(0) / 1000).toInt() }
+                    else { elapsed.text = Alignment.clock(position); seek.progress = if (b.duration > 0) (position * 1000 / b.duration).toInt() else 0 }
+                }
                 chapter.text = b.chapters.lastOrNull { it.start <= position }?.title?.trim()?.takeIf { it.isNotBlank() } ?: "Audiobook"
                 val rate = state.speed(b.id)
                 left.text = clockish(((b.duration - position).coerceAtLeast(0) / rate).toLong()) + " left" + if (rate != 1f) " at $rate×" else ""
+                if (byChapter) bookLine.text = "${Alignment.clock(position)} of ${Alignment.clock(b.duration)}  ·  ${left.text}"
                 val sleeping = if (PlaybackService.playingBook() == b.id) PlaybackService.sleepLeft() else -1L
                 sleep.text = when { sleeping < 0 -> "Sleep timer"; PlaybackService.sleepByChapter() -> "Ch. end ${Alignment.clock(sleeping)}"; else -> "Sleep ${Alignment.clock(sleeping)}" }
                 // A speed set on the web arrives after the screen opens.
@@ -2334,7 +2681,7 @@ class MainActivity : AppCompatActivity() {
         playerUpdate?.let { handler.removeCallbacks(it) }; playerUpdate = null
         closeReading()
         readingBook = b.id; readStart = System.currentTimeMillis(); readMs = 0; readPassage = state.passage(b.id); pagesTurned = 0
-        current = b; state.active = b.id
+        current = b; state.active = b.id; readerHasDock = b.tracks.isNotEmpty()
         pageFrame?.cancelTurn(); reader?.destroy(); detailStatus = null; syncLine = null
         miniTime = null; miniPlay = null; followButton = null; listenButton = null; bottomChrome = null
         listeningDock = null; dockTime = null; dockPause = null
@@ -2364,10 +2711,12 @@ class MainActivity : AppCompatActivity() {
         val frameReady = formatted.onReady
         var found = foundPassage; foundPassage = -1
         formatted.onReady = { frameReady(); formatted.setMarks(state.markIds(b.id, "highlight")); if (found >= 0) formatted.found(found) }
+        formatted.onHighlight = { first, last -> highlightSentences(b, first, last) }
+        formatted.onNote = { first, last -> noteSentences(b, first, last) }
+        formatted.onListen = { first, _ -> listenFrom(b, first, false) }
         formatted.onChosen = { p ->
             chosenAt = SystemClock.elapsedRealtime()
             state.select(b.id, p); lastPosition = p; refreshReadingChrome(b)
-            if (b.tracks.isNotEmpty()) note("Narration will start from this sentence", "Listen") { listenFrom(b, p, false) }
         }
         frame.onBrowse = {
             pagesTurned++
@@ -2425,8 +2774,15 @@ class MainActivity : AppCompatActivity() {
             listeningDock = dock
         }
         shell.addView(layout, FrameLayout.LayoutParams(-1, -1))
+        // Fades over the page where a bar or the dock would slice a line; plain views that take no touches (see updateReaderFades).
+        fun fade() = View(this).apply { isClickable = false; isFocusable = false; importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO; visibility = View.INVISIBLE }
+        fadeTop = fade(); fadeBottom = fade(); fadePaper = null
+        shell.addView(fadeTop, FrameLayout.LayoutParams(-1, dp(20)).apply { gravity = Gravity.TOP })
+        shell.addView(fadeBottom, FrameLayout.LayoutParams(-1, dp(20)).apply { gravity = Gravity.TOP })
+        val refit = View.OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateReaderFades() }
+        frame.addOnLayoutChangeListener(refit); listeningDock?.addOnLayoutChangeListener(refit)
         // The dock overlays the bottom of the page (it carries the progress), so playback never resizes the page.
-        listeningDock?.let { shell.addView(it, FrameLayout.LayoutParams(-1, dp(50)).apply { gravity = Gravity.BOTTOM }) }
+        listeningDock?.let { shell.addView(it, FrameLayout.LayoutParams(-1, dp(dockDp)).apply { gravity = Gravity.BOTTOM }) }
         brightnessPill = ui.text("", 13f).apply {
             setTextColor(bg); background = ui.shape(androidx.core.graphics.ColorUtils.setAlphaComponent(fg, 220), 18)
             setPadding(dp(16), dp(8), dp(16), dp(8)); visibility = View.GONE
@@ -2449,7 +2805,7 @@ class MainActivity : AppCompatActivity() {
                 4 -> markFinished(b, true); 5 -> discardProgress(b); 6 -> toggleChrome(false)
             } }
         })
-        chrome.addView(top)
+        chrome.addView(top); top.addOnLayoutChangeListener(refit)
         chrome.addView(View(this), LinearLayout.LayoutParams(-1, 0, 1f))
         val bottom = ui.column().apply { setBackgroundColor(bg); elevation = dp(4).toFloat(); setPadding(dp(16), dp(8), dp(16), dp(12)) }
         bottomChrome = bottom
@@ -2472,7 +2828,7 @@ class MainActivity : AppCompatActivity() {
             mini.addView(ui.icon("headphones", "Expand audiobook player", fg) { playerScreen(b) })
             bottom.addView(mini)
         }
-        chrome.addView(bottom); shell.addView(chrome, FrameLayout.LayoutParams(-1, -1))
+        chrome.addView(bottom); bottom.addOnLayoutChangeListener(refit); shell.addView(chrome, FrameLayout.LayoutParams(-1, -1))
         ViewCompat.setOnApplyWindowInsetsListener(shell) { _, insets ->
             // Edge to edge: the page (and its curl) covers the whole screen; only the text and the
             // native bars keep clear of the cutout and the gesture bar.
@@ -2496,7 +2852,7 @@ class MainActivity : AppCompatActivity() {
         lastPosition = state.passage(b.id); chromeVisible = false
         refreshReadingChrome(b)
         if (!getPreferences(MODE_PRIVATE).getBoolean("readingHint", false)) {
-            Toast.makeText(this, if (b.tracks.isNotEmpty()) "Tap the center for controls. Long-press a sentence to listen from it." else "Tap the center for controls. Tap an edge or swipe to turn.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, if (b.tracks.isNotEmpty()) "Tap the center for controls. Long-press a sentence and choose Listen to hear it read from there." else "Tap the center for controls. Tap an edge or swipe to turn.", Toast.LENGTH_LONG).show()
             getPreferences(MODE_PRIVATE).edit().putBoolean("readingHint", true).apply()
         }
     }
@@ -2533,6 +2889,7 @@ class MainActivity : AppCompatActivity() {
                 dock.setBackgroundColor(androidx.core.graphics.ColorUtils.blendARGB(bg, fg, .05f)); tint(dock)
             }
         }
+        updateReaderFades()
     }
     /** Where the narration is relative to the page being read. */
     private fun parity(b: Book): String {
@@ -2550,6 +2907,70 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Soft edges over the page, drawing only: where a bar or the dock would cut a line of text through, the text
+     * dissolves into the paper. Controls shown: below the top bar and above the bottom bar. Controls hidden in the
+     * continuous layout: below the content's top edge and above the dock (or the content's bottom edge). Pages with
+     * the controls hidden get none, and none while a page is turning.
+     */
+    private fun updateReaderFades() {
+        val shell = readingShell ?: return; val frame = pageFrame ?: return
+        val top = fadeTop ?: return; val bottom = fadeBottom ?: return
+        var topEdge = -1; var bottomEdge = -1
+        val bars = readerInsets
+        val dock = listeningDock
+        if (frame.isTurning) { /* nothing floats over a turning page */ }
+        else if (chromeVisible) {
+            val bar = readingChrome?.getChildAt(0); val foot = bottomChrome
+            if (bar != null && foot != null && bar.height > 0 && foot.height > 0) { topEdge = bar.bottom; bottomEdge = foot.top }
+        } else if ((state.scrollMode || reader?.scrollOverride == true) && bars != null && frame.height > 0) {
+            topEdge = frame.top + (if (chapterLabel?.visibility == View.VISIBLE) 0 else bars.top)
+            bottomEdge = if (dock != null && dock.visibility == View.VISIBLE && dock.height > 0) dock.top else frame.bottom - (if (readingFooter?.visibility == View.VISIBLE) 0 else bars.bottom) - dockRoom
+        }
+        val paper = ReadingColors.background(this, state)
+        val h = dp(20)
+        // The top and bottom fade views are each one line of the page's text tall (text size times line spacing, in the page's own
+        // units, which are dp), never under 20 dp, so a line a bar's edge cuts dissolves instead of showing half
+        // letters. Its height depends only on the text settings, so showing or hiding the controls never changes it
+        // and asks for no layout: what differs is the drawing inside it (controls showing: the whole height, solid
+        // over the first third and then easing out; hidden: the old 20 dp fade at the top and clear below).
+        val topH = kotlin.math.ceil(state.font * state.lineHeight / 100.0).toInt().let { dp(it) }.coerceAtLeast(h)
+        // Built only when the paper colour, the height or the look changes; INVISIBLE, never GONE, so no layout is asked for from here.
+        if (fadePaper != paper || fadeTopHeight != topH || fadeTopTall != chromeVisible) {
+            val clear = androidx.core.graphics.ColorUtils.setAlphaComponent(paper, 0)
+            val tall = chromeVisible
+            val colors = if (tall) intArrayOf(paper, paper, androidx.core.graphics.ColorUtils.setAlphaComponent(paper, 110), clear) else intArrayOf(paper, clear, clear)
+            val stops = if (tall) floatArrayOf(0f, .33f, .7f, 1f) else floatArrayOf(0f, h.toFloat() / topH, 1f)
+            top.background = android.graphics.drawable.PaintDrawable().apply {
+                shape = android.graphics.drawable.shapes.RectShape()
+                shaderFactory = object : android.graphics.drawable.ShapeDrawable.ShaderFactory() {
+                    override fun resize(width: Int, height: Int) = android.graphics.LinearGradient(0f, 0f, 0f, height.toFloat(), colors, stops, android.graphics.Shader.TileMode.CLAMP)
+                }
+            }
+            // The bottom fade is the mirror: the same height, clear at the top, nearly solid over the last third nearest
+            // the bar when the controls show; hidden, the old 20 dp fade at the bottom of the view and clear above it.
+            val bColors = if (tall) intArrayOf(clear, androidx.core.graphics.ColorUtils.setAlphaComponent(paper, 110), paper, paper) else intArrayOf(clear, clear, paper)
+            val bStops = if (tall) floatArrayOf(0f, .3f, .67f, 1f) else floatArrayOf(0f, 1f - h.toFloat() / topH, 1f)
+            bottom.background = android.graphics.drawable.PaintDrawable().apply {
+                shape = android.graphics.drawable.shapes.RectShape()
+                shaderFactory = object : android.graphics.drawable.ShapeDrawable.ShaderFactory() {
+                    override fun resize(width: Int, height: Int) = android.graphics.LinearGradient(0f, 0f, 0f, height.toFloat(), bColors, bStops, android.graphics.Shader.TileMode.CLAMP)
+                }
+            }
+            // Only a change of text size or line spacing reaches this: the controls do not.
+            for (v in listOf(top, bottom)) (v.layoutParams as FrameLayout.LayoutParams).let { lp -> if (lp.height != topH) { lp.height = topH; v.layoutParams = lp } }
+            fadePaper = paper; fadeTopHeight = topH; fadeTopTall = tall
+        }
+        fun place(v: View, edge: Int, y: Float) {
+            val want = if (edge < 0) View.INVISIBLE else View.VISIBLE
+            if (v.visibility != want) v.visibility = want
+            if (edge >= 0 && v.translationY != y) v.translationY = y
+        }
+        place(top, topEdge, topEdge.toFloat())
+        // The bottom view is topH tall too, so it is lifted by its real height and still ends exactly at the edge.
+        place(bottom, bottomEdge, (bottomEdge - topH).toFloat())
+    }
+
     /** Gives the system-bar insets to whichever views touch the screen edges right now. */
     private fun applyReaderInsets() {
         val bars = readerInsets ?: return
@@ -2558,8 +2979,13 @@ class MainActivity : AppCompatActivity() {
         val bottomStrip = readingFooter?.visibility == View.VISIBLE
         chapterLabel?.let { it.setPadding(dp(30) + bars.left, bars.top, dp(30) + bars.right, 0); it.layoutParams = (it.layoutParams as LinearLayout.LayoutParams).apply { height = dp(30) + bars.top } }
         readingFooter?.let { it.setPadding(dp(24) + bars.left, 0, dp(24) + bars.right, bars.bottom); it.layoutParams = (it.layoutParams as LinearLayout.LayoutParams).apply { height = dp(34) + bars.bottom } }
-        listeningDock?.let { it.setPadding(dp(16) + bars.left, 0, dp(16) + bars.right, bars.bottom); it.layoutParams = (it.layoutParams as FrameLayout.LayoutParams).apply { height = dp(50) + bars.bottom } }
-        frame.setContentInsets(bars.left, if (topStrip) 0 else bars.top, bars.right, if (bottomStrip) 0 else bars.bottom)
+        listeningDock?.let { it.setPadding(dp(16) + bars.left, 0, dp(16) + bars.right, bars.bottom); it.layoutParams = (it.layoutParams as FrameLayout.LayoutParams).apply { height = dp(dockDp) + bars.bottom } }
+        // The same margins go to the live page and the pre-rendered pages (setContentInsets), so turns do not jump.
+        // Not in the reader's own scrolled mode (a setting, so never switched by playback): there the text runs under the dock and the fade handles it.
+        val dockClear = if (readerHasDock && !state.scrollMode) (dp(dockDp) - dp(pageMarginDp)).coerceAtLeast(0) else 0
+        dockRoom = dockClear
+        frame.setContentInsets(bars.left, if (topStrip) 0 else bars.top, bars.right, (if (bottomStrip) 0 else bars.bottom) + dockClear)
+        updateReaderFades()
     }
 
     /**
@@ -2575,6 +3001,7 @@ class MainActivity : AppCompatActivity() {
         r.scrollOverride = true
         pageFrame?.scrollOverride = true
         pageFrame?.cancelTurn()
+        updateReaderFades()
         programmaticGoAt = SystemClock.elapsedRealtime()
         r.restyle()
     }
@@ -2587,6 +3014,7 @@ class MainActivity : AppCompatActivity() {
         val r = reader ?: return false
         if (!r.scrollOverride || (PlaybackService.playingBook() == b.id && PlaybackService.playing())) return false
         r.scrollOverride = false
+        updateReaderFades()
         programmaticGoAt = SystemClock.elapsedRealtime()
         return true
     }
@@ -2619,6 +3047,7 @@ class MainActivity : AppCompatActivity() {
             readingFooter?.visibility = if (scrolled && !playing) View.VISIBLE else View.GONE
             applyReaderInsets()
         }
+        updateReaderFades()
     }
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (volumeKeysTurn() && keyCode in listOf(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_UP)) {
@@ -2706,7 +3135,7 @@ class MainActivity : AppCompatActivity() {
 
         settingsGroup(body, "YOUR READING").apply {
             if (signedIn) {
-                val week = settingsRow(this, "chart", "Reading and listening", statsLine?.removePrefix("This week  ·  ")?.removeSuffix("  ›") ?: "This week, streaks and time of day") { statsScreen() }
+                val week = settingsRow(this, "chart", "Reading and listening", statsLine?.replace('\u00A0', ' ')?.removePrefix("This week  ·  ") ?: "This week, streaks and time of day") { statsScreen() }
                 if (statsLine == null) kotlin.concurrent.thread {
                     val text = runCatching {
                         val r = Server.client(state)!!.stats(); val w = r.getJSONObject("week")
@@ -2739,7 +3168,6 @@ class MainActivity : AppCompatActivity() {
                     val n = runCatching { Server.client(state)!!.devices().size }.getOrNull() ?: return@thread
                     runOnUiThread { devices.text = "$n ${if (n == 1) "device" else "devices"}" }
                 }
-                settingsRow(this, "watch", "Wear OS sign-in", "Sign your watch in with the code it shows") { wearSignIn() }
                 if (state.serverRole == "admin" || state.serverUser.isBlank()) settingsRow(this, "people", "People on your server", "Accounts, roles and passwords") { usersScreen() }
                 if (state.serverUser.isNotBlank()) settingsRow(this, "lock", "Change password", null) {
                     val form = ui.column().apply { setPadding(dp(24), dp(8), dp(24), 0) }
@@ -2939,7 +3367,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     detailStatus?.text = ImportService.status
                     detailStatus?.visibility = if (ImportService.status.isBlank()) View.GONE else View.VISIBLE
-                    for ((view, book) in syncLines) view.text = shelfLine(book) + if (view.maxLines == 1) "  ›" else ""
+                    for ((view, book, short) in syncLines) view.text = (if (short) shortLine(book) else shelfLine(book)) + if (short) "  ›" else ""
                     if (redisplay != null && shelfSignatureNow() != shelfSignature) redisplay?.invoke()
                     if (!ImportService.busy && ImportService.status != previousImport) {
                         previousImport = ImportService.status
@@ -3152,39 +3580,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /**
-     * Wear OS sign-in: the watch shows a six-digit code; typed here, it signs that watch in as this person, so the
-     * password is never typed on the watch. The person is shown which device asked, and from where, before saying yes.
-     */
-    private fun wearSignIn() {
-        val client = Server.client(state) ?: return
-        fun said(e: Throwable): String { val m = e.message.orEmpty(); return when { m.startsWith("Server answered") && ": " in m -> m.substringAfter(": "); m.startsWith("Server answered 404") || e is org.json.JSONException -> "Your server needs an update for this"; else -> "Could not reach your server" } }
-        val input = EditText(this).apply {
-            hint = "Code on the watch"; setSingleLine(); textSize = 22f; letterSpacing = .2f
-            inputType = android.text.InputType.TYPE_CLASS_NUMBER; filters = arrayOf(android.text.InputFilter.LengthFilter(6))
-        }
-        MaterialAlertDialogBuilder(this).setTitle("Wear OS sign-in").setMessage("Open Unison on the watch and type the code it shows.")
-            .setView(ui.column().apply { setPadding(dp(24), dp(8), dp(24), 0); addView(input) })
-            .setPositiveButton("Continue") { _, _ ->
-                val code = input.text.toString().filter { it.isDigit() }
-                if (code.length != 6) { note("The code is six digits"); return@setPositiveButton }
-                kotlin.concurrent.thread {
-                    val asked = runCatching { client.linkInfo(code) }
-                    runOnUiThread {
-                        if (gone()) return@runOnUiThread
-                        val d = asked.getOrElse { note(said(it)); return@runOnUiThread }
-                        MaterialAlertDialogBuilder(this).setTitle("Sign in ${d.device}?")
-                            .setMessage("${d.device} asked for this code from ${d.address}. It will be signed in as ${state.serverUser.ifBlank { "you" }}, with your shelf and your places. Approve only a code you can see on your own watch.")
-                            .setPositiveButton("Sign it in") { _, _ ->
-                                kotlin.concurrent.thread { val r = runCatching { client.linkApprove(code) }; runOnUiThread { if (!gone()) note(r.fold({ "${d.device} is signed in" }, { said(it) })) } }
-                            }
-                            .setNegativeButton("Cancel", null).show()
-                    }
-                }
-            }
-            .setNegativeButton("Cancel", null).show()
-    }
-
     /** The household's accounts, for an admin: who there is, add someone, remove someone. */
     private fun usersScreen() {
         arrive("users")
@@ -3225,7 +3620,7 @@ class MainActivity : AppCompatActivity() {
                     if (!u.name.equals(state.serverUser, true)) row.addView(ui.button("Set password", false) {
                         val secret = EditText(this).apply { hint = "New password (at least eight characters)"; setSingleLine(); inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD }
                         val box = ui.column().apply { setPadding(dp(24), dp(8), dp(24), 0); addView(secret) }
-                        MaterialAlertDialogBuilder(this).setTitle("New password for ${u.name}").setMessage("They sign in with it from now on. Devices already signed in stay signed in.").setView(box)
+                        MaterialAlertDialogBuilder(this).setTitle("New password for ${u.name}").setMessage("This signs ${u.name} out on every device. They sign in again with the new password.").setView(box)
                             .setPositiveButton("Set") { _, _ ->
                                 val typed = secret.text.toString()
                                 if (typed.length < 8) note("Eight characters at least")
@@ -3282,13 +3677,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun booksText(n: Int) = when (n) { 0 -> "Nothing yet"; 1 -> "1 book"; else -> "$n books" }
 
-    /** My shelf → Lists: Want to read, the collections, and the way to the wanted list. */
-    private fun listsScreen() {
-        arrive("lists")
+    /** Journal: the personal things. Highlights and Stats, then (with a server) the lists: Want to read, the collections and the wanted list. */
+    private fun journalScreen() {
+        arrive("journal")
         current = null
         val body = screen("")
-        pageHeader(body, "WANT TO READ & COLLECTIONS") { goHome() }
-        body.addView(ui.text("Lists", 34f, true)); ui.space(body, 10)
+        body.addView(masthead())
+        ui.space(body, 12)
+        body.addView(ui.text("Journal", 34f, true)); ui.space(body, 10)
+        val server = state.serverUrl.isNotBlank()
+        val hasMarks = db.books().any { state.marks(it.id).length() > 0 }
+        if (hasMarks || server) body.addView(settingRow("Highlights", "Passages you marked, book by book", "book") { allMarksScreen() })
+        if (server) body.addView(settingRow("Stats", "Reading and listening, by week and by year", "chart") { statsScreen() })
+        if (!hasMarks && !server) body.addView(ui.text("Highlights you make while reading collect here.", 14f).apply { setTextColor(ui.muted) })
+        if (!server) return
+        sectionHead(body, "LISTS")
         val list = ui.column(); body.addView(list)
         fun render() {
             list.removeAllViews()
@@ -3309,7 +3712,7 @@ class MainActivity : AppCompatActivity() {
         arrive("list:$key")
         current = null
         val body = screen("")
-        pageHeader(body, "LISTS") { listsScreen() }
+        pageHeader(body, "LISTS") { journalScreen() }
         val title = ui.text(serverLists?.firstOrNull { it.key == key }?.name ?: "", 34f, true).apply { maxLines = 2 }
         body.addView(title); ui.space(body, 6)
         val count = ui.text("", 14f).apply { setTextColor(ui.muted) }; body.addView(count)
@@ -3335,7 +3738,7 @@ class MainActivity : AppCompatActivity() {
                 small("Rename") { askText("Rename this collection", "Its name", c.name, "Rename") { name -> onServer({ it.renameCollection(key, name) }) { r -> serverLists = serverLists?.map { l -> if (l.key == key) r else l }?.sortedWith(compareBy<ServerClient.ListInfo> { it.kind != "want" }.thenBy { it.name.lowercase() }); render() } } }
                 small("Remove collection") {
                     MaterialAlertDialogBuilder(this).setMessage("Remove “${c.name}”? The collection goes; its books stay in the library.")
-                        .setPositiveButton("Remove") { _, _ -> onServer({ it.deleteCollection(key) }) { serverLists = serverLists?.filter { it.key != key }; listsScreen() } }.setNegativeButton("Cancel", null).show()
+                        .setPositiveButton("Remove") { _, _ -> onServer({ it.deleteCollection(key) }) { serverLists = serverLists?.filter { it.key != key }; journalScreen() } }.setNegativeButton("Cancel", null).show()
                 }
             }
             list.addView(HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(actions) })
@@ -3377,7 +3780,7 @@ class MainActivity : AppCompatActivity() {
         arrive("wanted")
         current = null
         val body = screen("")
-        pageHeader(body, "LISTS") { listsScreen() }
+        pageHeader(body, "LISTS") { journalScreen() }
         body.addView(ui.text("The wanted list", 34f, true)); ui.space(body, 6)
         body.addView(ui.text("Books the library does not have yet.", 14f).apply { setTextColor(ui.muted) }); ui.space(body, 12)
         val list = ui.column()
@@ -3423,21 +3826,19 @@ class MainActivity : AppCompatActivity() {
 
     /** A cover from the lookup, fetched by way of the server and kept in the cache; the title stands in until it is there. */
     private fun foundCover(f: ServerClient.Found, width: Int, height: Int): View {
-        val frame = FrameLayout(this).apply { background = ui.shape(ui.surface, 5); clipToOutline = true; layoutParams = LinearLayout.LayoutParams(dp(width), dp(height)); contentDescription = "Cover of ${f.title}" }
+        val slot = CoverSlot(ui, width, height, Gravity.CENTER).apply { contentDescription = "Cover of ${f.title}" }
         val file = File(cacheDir, "lookup/${f.cover.hashCode().toUInt().toString(16)}.img")
-        val image = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_CENTER }
-        fun show() { frame.removeAllViews(); image.setImageURI(Uri.fromFile(file)); frame.addView(image, FrameLayout.LayoutParams(-1, -1)) }
-        if (f.cover.isNotBlank() && file.isFile) show()
+        if (f.cover.isNotBlank() && file.isFile) slot.showFile(file)
         else {
-            frame.addView(ui.text(f.title, if (width > 80) 18f else 11f, true).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(10), dp(8), dp(10)); maxLines = 4; ellipsize = android.text.TextUtils.TruncateAt.END }, FrameLayout.LayoutParams(-1, -1))
+            slot.showPlaceholder(ui.text(f.title, if (width > 80) 18f else 11f, true).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(10), dp(8), dp(10)); maxLines = 4; ellipsize = android.text.TextUtils.TruncateAt.END })
             if (f.cover.isNotBlank()) Server.client(state)?.let { client ->
                 coverPool.execute {
                     runCatching { if (!file.isFile) client.lookupCover(f.cover, file) }
-                    if (file.isFile) runOnUiThread { if (frame.isAttachedToWindow) show() }
+                    if (file.isFile) runOnUiThread { if (slot.isAttachedToWindow) slot.showFile(file) }
                 }
             }
         }
-        return frame
+        return slot
     }
 
     private fun foundLine(f: ServerClient.Found) = when {

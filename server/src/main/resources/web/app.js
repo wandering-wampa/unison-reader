@@ -12,7 +12,7 @@ const el = (tag, attrs = {}, ...children) => {
   return n;
 };
 const fmtClock = ms => { const s = Math.max(0, Math.round(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' : '') + String(m).padStart(h ? 2 : 1, '0') + ':' + String(x).padStart(2, '0'); };
-const fmtHours = ms => { const h = ms / 3600000; return h >= 10 ? Math.round(h) + ' h' : h >= 1 ? h.toFixed(1) + ' h' : Math.round(ms / 60000) + ' min'; };
+const fmtHours = ms => { const h = ms / 3600000; return h >= 10 ? Math.round(h) + ' h' : h >= 1 ? h.toFixed(1) + ' h' : Math.round(ms / 60000) + ' min'; };
 const fmtLong = ms => { const m = Math.round(ms / 60000); return m >= 60 ? `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')} m` : `${m} min`; };
 const fmtDate = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 // A notice that leads somewhere: stays longer, and a click goes there.
@@ -28,6 +28,8 @@ const theme = { get() { return localStorage.getItem('unison.theme') || 'system';
   draw() { const b = $('#theme'); if (b) { b.innerHTML = themeIcon[this.get()]; b.title = { system: 'Following the system (click for light)', light: 'Light (click for dark)', dark: 'Dark (click to follow the system)' }[this.get()]; } } };
 $('#theme').onclick = () => theme.set(THEMES[(THEMES.indexOf(theme.get()) + 1) % THEMES.length]);
 theme.draw();
+// The sign-in logo follows the chosen theme, and the system's setting when none is chosen.
+const logoSrc = () => { const t = document.documentElement.dataset.theme; return (t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches) ? '/brand/logo-dark.webp' : '/brand/logo-light.webp'; };
 
 // ---------------------------------------------------------------- API
 const store = { get token() { return localStorage.getItem('unison.token') || ''; }, set token(v) { v ? localStorage.setItem('unison.token', v) : localStorage.removeItem('unison.token'); },
@@ -41,7 +43,7 @@ async function api(path, opts = {}) {
   if (opts.body && typeof opts.body !== 'string') { opts.body = JSON.stringify(opts.body); headers['Content-Type'] = 'application/json'; }
   const r = await fetch(path, Object.assign({}, opts, { headers }));
   if (r.status === 401 && path !== '/api/login') { store.token = ''; store.user = null; localStorage.removeItem('unison.cookie'); route(); throw new Error('Sign in first'); }
-  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).message || m; } catch {} throw new Error(m); }
+  if (!r.ok) { let m = r.statusText, body = null; try { body = await r.json(); m = body.message || m; } catch {} throw Object.assign(new Error(m), { status: r.status, body }); }
   const ct = r.headers.get('content-type') || '';
   return ct.includes('json') ? r.json() : r;
 }
@@ -57,7 +59,7 @@ const beacon = (path, body, base) => navigator.sendBeacon?.(`${path}?device=${en
 // The server's work record says which files it has by path; the client wants plain flags.
 const norm = w => Object.assign(w, { hasEbook: !!w.ebookPath, hasAudio: !!w.audioDir || w.duration > 0, audioOnly: !!w.audioOnly });
 const rows = list => list.map(r => Object.assign(norm(r.work), { sync: r.shelf }));
-const cache = { works: null, shelf: null, lists: null, series: null, authors: null, narrators: null, details: new Map(), stats: null, chapters: new Map(), anchors: new Map() };
+const cache = { works: null, shelf: null, lists: null, details: new Map(), stats: null, chapters: new Map(), anchors: new Map() };
 // The sentence being narrated at an audio time, from the book's alignment (anchors sorted by start); null without one.
 function sentenceAt(id, ms) {
   const a = cache.anchors.get(id); if (!a?.length) return null;
@@ -124,7 +126,7 @@ setInterval(() => sessions.flush(false), 60000);
 
 // ---------------------------------------------------------------- Player
 const audio = $('#audio');
-const SPEEDS = [0.8, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2];
+const SPEEDS = [0.75, 0.8, 1, 1.1, 1.2, 1.25, 1.5, 1.75, 2];
 const SLEEPS = [['off', 'Sleep'], [15, 'Sleep · 15 min'], [30, 'Sleep · 30 min'], [60, 'Sleep · 1 h'], ['chapter', 'Sleep · end of chapter']];
 const player = {
   work: null, detail: null, tracks: [], track: 0, speed: Number(localStorage.getItem('unison.speed') || 1), pushed: '', timer: null, listeners: new Set(), sleep: { mode: 'off', at: 0 },
@@ -179,16 +181,23 @@ const player = {
     const id = this.work.id;
     const remote = await api(`/api/works/${id}/position`).catch(() => null);
     if (!remote || remote.updated <= (places.known.get(id) || 0)) return true;
+    return (await this.reconcile(remote, `${id}:${this.globalMs()}` !== this.pushed)) !== 'later';
+  },
+  /**
+   * The rules for a newer place from another device. `moved`: this tab moved since its last save. Resolves 'there',
+   * 'here', 'kept' (close enough, kept here) or 'later' (dismissed: nothing changed).
+   */
+  async reconcile(remote, moved) {
+    const id = this.work.id;
     const g = this.globalMs();
     const here = { passage: sentenceAt(id, g) ?? 0, audio: g };
-    const moved = `${id}:${g}` !== this.pushed;
-    const take = async () => { places.known.set(id, remote.updated); await this.seekTo(remote.audio, false); this.pushed = `${id}:${this.globalMs()}`; };
-    if (!moved) { await take(); return true; }
-    if (!places.apart(here, remote)) { places.known.set(id, remote.updated); this.push(true); return true; }
+    const take = async () => { places.known.set(id, remote.updated); await this.seekTo(remote.audio, true); this.pushed = `${id}:${this.globalMs()}`; };
+    if (!moved) { await take(); return 'there'; }
+    if (!places.apart(here, remote)) { places.known.set(id, remote.updated); this.push(true); return 'kept'; }
     const choice = await places.ask(this.detail, remote, here);
     if (choice === 'there') await take();
     else if (choice === 'here') { places.known.set(id, remote.updated); this.push(true); }
-    return choice !== 'later';
+    return choice;
   },
   setSpeed(v) {
     this.speed = v; localStorage.setItem('unison.speed', v); audio.playbackRate = v;
@@ -208,10 +217,18 @@ const player = {
     if (!this.work) return;
     const g = this.globalMs(); const key = `${this.work.id}:${g}`;
     if (!force && key === this.pushed) return;
-    this.pushed = key;
+    const prev = this.pushed; this.pushed = key;
     const passage = reader.passageForAudio ? reader.passageForAudio(g) : sentenceAt(this.work.id, g) ?? (await detail(this.work.id)).position?.passage ?? 0;
     const id = this.work.id;
-    api(`/api/works/${id}/position`, { method: 'PUT', body: { passage, audio: g } }).then(p => places.known.set(id, p.updated)).catch(() => {});
+    const r = await savePlace(id, { passage, audio: g }).catch(() => null);
+    // A failed save is not a saved place: put the old value back (unless a later push has set its own) so the timer, the next push and the page-hide beacon try again.
+    if (!r) { if (this.pushed === key) this.pushed = prev; return; }
+    if (!r.conflict) { places.known.set(id, r.saved.updated); return; }
+    // Another device saved since this tab last knew: the save is dropped and the person is asked, once at a time.
+    // A question that was dismissed is not asked again for the same newer place.
+    if (this.asking || this.work?.id !== id || this.dismissed === `${id}:${r.conflict.updated}`) return;
+    this.asking = true;
+    try { if (await this.reconcile(r.conflict, true) === 'later') this.dismissed = `${id}:${r.conflict.updated}`; } finally { this.asking = false; }
   },
   close() { this.push(); sessions.end(); audio.pause(); audio.removeAttribute('src'); this.work = null; this.detail = null; $('#now').hidden = true; for (const fn of this.listeners) fn(null); },
 };
@@ -227,6 +244,8 @@ audio.addEventListener('timeupdate', () => {
 audio.addEventListener('play', () => { player.line(); clearInterval(player.timer); player.timer = setInterval(() => player.push(), 20000); if (player.work) sessions.start(player.work.id, 'listen'); for (const fn of player.listeners) fn(player.globalMs()); });
 audio.addEventListener('pause', () => { player.line(); clearInterval(player.timer); player.push(); sessions.end(); sessions.flush(false); for (const fn of player.listeners) fn(player.globalMs()); });
 audio.addEventListener('ended', () => { if (player.track < player.tracks.length - 1) player.seekTo(player.offset(player.track + 1)).then(() => audio.play()); else { player.push(); sessions.end(); } });
+// The connection came back: a save that failed while offline is tried again without the person doing anything.
+window.addEventListener('online', () => { if (player.work) player.push(); });
 window.addEventListener('pagehide', () => {
   if (player.work && `${player.work.id}:${player.globalMs()}` !== player.pushed) beacon(`/api/works/${player.work.id}/position`, { passage: reader.passageForAudio?.(player.globalMs()) ?? sentenceAt(player.work.id, player.globalMs()) ?? 0, audio: player.globalMs() }, audio.paused ? places.known.get(player.work.id) : undefined);
   reader.module?.beacon?.();
@@ -237,6 +256,14 @@ if ('mediaSession' in navigator) {
   navigator.mediaSession.setActionHandler('pause', () => audio.pause());
   navigator.mediaSession.setActionHandler('seekbackward', () => player.seekTo(player.globalMs() - 30000));
   navigator.mediaSession.setActionHandler('seekforward', () => player.seekTo(player.globalMs() + 30000));
+}
+
+// An ordinary position save. It names the server time of the place this browser last knew (`base`), so the server
+// refuses it when another device has saved since. Resolves { saved } or { conflict: the newer place }; other failures throw.
+async function savePlace(id, body) {
+  const base = places.known.get(id);
+  try { return { saved: await api(`/api/works/${id}/position${Number.isFinite(base) ? '?base=' + base : ''}`, { method: 'PUT', body }) }; }
+  catch (e) { if (e.status === 409 && e.body && typeof e.body.updated === 'number') return { conflict: e.body }; throw e; }
 }
 
 // The reader module registers itself here when loaded.
@@ -264,6 +291,14 @@ const places = {
   },
   // Resolves 'there', 'here', or 'later' (dismissed: nothing changes, and the question comes again next time).
   ask(d, remote, here) {
+    // One question per book at a time: a second asker (a timer save, the reader and the player) gets the same answer.
+    const open = this.pending.get(d.work.id); if (open) return open;
+    const p = this.askNow(d, remote, here).finally(() => this.pending.delete(d.work.id));
+    this.pending.set(d.work.id, p);
+    return p;
+  },
+  pending: new Map(),
+  askNow(d, remote, here) {
     return new Promise(resolve => {
       const dlg = el('dialog', { class: 'ask' });
       const done = v => { dlg.close(); dlg.remove(); resolve(v); };
@@ -281,7 +316,7 @@ const places = {
 const view = $('#view');
 let pageTeardown = null;
 function show(...nodes) { view.replaceChildren(...nodes.flat(Infinity).filter(n => n !== null && n !== undefined && n !== false)); window.scrollTo(0, 0); }
-function setTab(tab) { for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.tab === tab); }
+function setTab(tab) { tab = { lists: 'journal', highlights: 'journal', stats: 'journal' }[tab] || tab; for (const a of document.querySelectorAll('#nav a')) a.classList.toggle('on', a.dataset.tab === tab); }
 const coverOf = (w, cls = 'cover') => w.cover ? el('img', { class: cls, src: coverUrl(w.id), alt: '', loading: 'lazy' }) : el('div', { class: cls + ' empty' }, w.title);
 
 function card(w, line) {
@@ -356,7 +391,7 @@ async function setupView(s) {
       err.textContent = x.message;
     }
   } },
-    el('img', { src: matchMedia('(prefers-color-scheme: dark)').matches ? '/brand/logo-dark.webp' : '/brand/logo-light.webp', alt: 'Unison' }),
+    el('img', { src: logoSrc(), alt: 'Unison' }),
     el('h1', {}, s.reset ? 'Choose a new admin password' : 'Set up this server'),
     el('p', { class: 'muted' }, s.reset ? 'The admin password was reset on the server. Choose a new one for admin. The other accounts are as they were.' : 'Nobody can sign in yet. Choose a password for the first account, admin. You add the other people afterwards, on the Admin page.'),
     s.reset ? null : found,
@@ -385,7 +420,7 @@ async function signIn(error, skipSetup) {
       signedIn(a);
     } catch (x) { err.textContent = x.message; }
   } },
-    el('img', { src: matchMedia('(prefers-color-scheme: dark)').matches ? '/brand/logo-dark.webp' : '/brand/logo-light.webp', alt: 'Unison' }),
+    el('img', { src: logoSrc(), alt: 'Unison' }),
     el('p', { class: 'muted', style: 'text-align:center;margin:0' }, 'Your ebooks and audiobooks, in unison.'),
     el('label', { class: 'field' }, 'Name', name), el('label', { class: 'field' }, 'Password', pass), err,
     el('button', { class: 'primary', type: 'submit' }, 'Sign in'));
@@ -446,50 +481,108 @@ async function shelfView() {
   const panel = await weekPanel(); if (panel) top.append(panel);
   nodes.push(top);
   if (reading.length > 1 || (reading.length === 1 && !current)) { nodes.push(el('div', { class: 'section' }, el('h2', {}, 'On my shelf'), el('span', { class: 'muted' }, `${reading.length} in progress`))); nodes.push(el('div', { class: 'grid' }, reading.map(({ w, e }) => card(w, progressOf(w, e.position))))); }
-  else if (!reading.length) nodes.push(el('div', { class: 'section' }, el('h2', {}, 'On my shelf'), el('span', { class: 'muted' }, 'Browse Books, Series or Authors and add what you want to read next.')));
+  else if (!reading.length) nodes.push(el('div', { class: 'section' }, el('h2', {}, 'On my shelf'), el('span', { class: 'muted' }, 'Browse eBooks or Audiobooks and add what you want to read next.')));
   if (nextUp.length) { nodes.push(el('div', { class: 'section' }, el('h2', {}, 'Next in your series'), el('span', { class: 'muted' }, nextUp.length))); nodes.push(el('div', { class: 'grid' }, nextUp.slice(0, 7).map(p => card(byId.get(p.next), (onShelf.has(p.next) ? 'On my shelf · ' : '') + `${p.finished} of ${p.total} finished`)))); }
   if (want.length) { nodes.push(el('div', { class: 'section' }, el('h2', {}, 'Want to read'), el('a', { class: 'muted', href: '#/lists/want' }, `${plural(want.length, 'book')} · All ›`))); nodes.push(el('div', { class: 'grid' }, want.slice(0, 7).map(w => card(w, syncLine(w))))); }
-  nodes.push(el('div', { class: 'section' }, el('h2', {}, 'Ready to read & listen'), el('a', { class: 'muted', href: '#/books' }, `${ready.length} books · All books ›`)));
+  nodes.push(el('div', { class: 'section' }, el('h2', {}, 'Ready to read & listen'), el('a', { class: 'muted', href: '#/ebooks' }, `${ready.length} books · All eBooks ›`)));
   nodes.push(el('div', { class: 'grid' }, ready.slice(0, 14).map(w => card(w))));
   const pair = el('div', { class: 'pair', style: 'margin-top:44px' });
   pair.append(el('div', {}, el('div', { class: 'section', style: 'margin-top:0' }, el('h2', {}, 'Getting ready'), el('span', { class: 'muted' }, preparing.length)),
     preparing.length ? el('div', { class: 'list' }, preparing.slice(0, 5).map(w => el('a', { class: 'row', href: `#/book/${w.id}` }, coverOf(w), el('div', { class: 'grow' }, el('div', { class: 't' }, w.title), el('div', { class: 's' }, el('span', { class: 'dot warn' }), syncLine(w)), w.syncedPercent > 0 && !syncFailed(w) ? el('div', { class: 'bar warn', style: 'margin-top:6px;max-width:220px' }, el('i', { style: `width:${w.syncedPercent}%` })) : null))),
-      preparing.length > 5 ? el('a', { class: 'row', href: '#/books', style: 'justify-content:center;color:var(--accent);font-weight:500' }, `All ${preparing.length} in Books ›`) : null) : el('p', { class: 'muted' }, 'Nothing syncing right now.')));
+      preparing.length > 5 ? el('a', { class: 'row', href: '#/ebooks', style: 'justify-content:center;color:var(--accent);font-weight:500' }, `All ${preparing.length} in eBooks ›`) : null) : el('p', { class: 'muted' }, 'Nothing syncing right now.')));
   pair.append(el('div', {}, el('div', { class: 'section', style: 'margin-top:0' }, el('h2', {}, 'Missing a piece'), el('span', { class: 'muted' }, missing.length)),
     el('div', { class: 'list' }, missing.filter(w => onShelf.has(w.id)).concat(missing.filter(w => !onShelf.has(w.id))).slice(0, 5).map(w => el('a', { class: 'row', href: `#/book/${w.id}` }, coverOf(w), el('div', { class: 'grow' }, el('div', { class: 't' }, w.title), el('div', { class: 's' }, w.hasAudio ? 'Audiobook only · pair it with an ebook' : 'Ebook only · an audiobook would pair')), el('span', { class: 'muted' }, '›'))),
-      missing.length > 5 ? el('a', { class: 'row', href: '#/books', style: 'justify-content:center;color:var(--accent);font-weight:500' }, `All ${missing.length} in Books ›`) : null)));
+      missing.length > 5 ? el('a', { class: 'row', href: '#/ebooks', style: 'justify-content:center;color:var(--accent);font-weight:500' }, `All ${missing.length} in eBooks ›`) : null)));
   nodes.push(pair);
   if (finished.length) { nodes.push(el('div', { class: 'section' }, el('h2', {}, 'Finished'), el('span', { class: 'muted' }, finished.length))); nodes.push(el('div', { class: 'grid' }, finished.map(({ w, e }) => card(w, 'Finished ' + fmtDate(e.finishedAt || e.added))))); }
   show(nodes);
 }
 
-let booksFilter = 'all', booksShown = 60;
-async function booksView(query) {
-  setTab(query ? null : 'books');
-  const list = query ? rows(await api(`/api/works?q=${encodeURIComponent(query)}`)) : await works();
-  const filters = [['all', 'All'], ['ready', 'Ready'], ['preparing', 'Syncing'], ['ebook', 'Ebook only'], ['audio', 'Audio only']];
-  const match = w => booksFilter === 'all' || (booksFilter === 'ebook' ? w.hasEbook && !w.hasAudio : booksFilter === 'audio' ? w.hasAudio && !w.hasEbook : w.sync === booksFilter);
-  const shown = list.filter(match);
-  const render = () => show(
-    el('h1', {}, query ? `Results for “${query}”` : 'Books'),
-    el('div', { class: 'chips' }, filters.map(([k, label]) => el('button', { class: 'chip' + (booksFilter === k ? ' on' : ''), onclick: () => { booksFilter = k; booksShown = 60; booksView(query); } }, label))),
-    el('div', { class: 'muted' }, `${shown.length} ${shown.length === 1 ? 'book' : 'books'}`),
-    el('div', { class: 'grid' }, shown.slice(0, booksShown).map(w => card(w, syncLine(w)))),
-    query && !list.length ? el('p', {}, 'Nothing in the library matches.  ', el('a', { href: `#/wanted/ask/${encodeURIComponent(query)}`, style: 'color:var(--accent);font-weight:500' }, 'Ask for it ›')) : null,
-    shown.length > booksShown ? el('div', { style: 'margin-top:22px' }, el('button', { class: 'ghost', onclick: () => { booksShown += 120; render(); } }, `Show ${Math.min(120, shown.length - booksShown)} more`)) : null);
+// ---------------------------------------------------------------- Sections: eBooks and Audiobooks
+const SECTIONS = { ebooks: { label: 'eBooks', fmt: 'ebook', other: 'audiobooks', has: w => w.hasEbook }, audiobooks: { label: 'Audiobooks', fmt: 'audio', other: 'ebooks', has: w => w.hasAudio } };
+const SUBS = {
+  ebooks: [['', 'All'], ['authors', 'Authors'], ['series', 'Series'], ['genres', 'Genres']],
+  audiobooks: [['', 'All'], ['authors', 'Authors'], ['narrators', 'Narrators'], ['series', 'Series'], ['genres', 'Genres']],
+  journal: [['lists', 'Lists'], ['highlights', 'Highlights'], ['stats', 'Stats']],
+};
+const enc = encodeURIComponent;
+// The section last used, so a link from a book page or an old address lands where the person was.
+let lastSection = (() => { try { const s = localStorage.getItem('unison.section'); return SECTIONS[s] ? s : 'ebooks'; } catch { return 'ebooks'; } })();
+const rememberSection = sec => { lastSection = sec; try { localStorage.setItem('unison.section', sec); } catch {} };
+const sectionFor = w => SECTIONS[lastSection].has(w) ? lastSection : w.hasEbook ? 'ebooks' : 'audiobooks';
+const secHref = (sec, kind, name) => `#/${sec}/${kind}/${enc(name)}`;
+// The row of a section page: text tabs, the current one underlined.
+function subnav(section, current) {
+  const href = k => section === 'journal' ? `#/${k}` : `#/${section}${k ? '/' + k : ''}`;
+  return el('nav', { class: 'subnav', 'aria-label': (SECTIONS[section]?.label || 'Journal') + ' sections' }, SUBS[section].map(([k, label]) => el('a', { href: href(k), 'aria-current': k === current ? 'page' : null }, label)));
+}
+// The heading of a section page: its name, for the libraries how many books it holds, and the row to pick from.
+async function sectionHead(section, current) {
+  if (section === 'journal') return [el('h1', {}, 'Journal'), subnav('journal', current)];
+  const n = (await works()).filter(SECTIONS[section].has).length;
+  return [el('h1', {}, SECTIONS[section].label), el('div', { class: 'muted' }, plural(n, 'book')), subnav(section, current)];
+}
+// A cover grid that shows a page of it and the rest on request. `st.n` is kept by the caller so Back finds the same length.
+function pagedGrid(list, lineOf, st) {
+  const box = el('div');
+  const render = () => box.replaceChildren(el('div', { class: 'grid' }, list.slice(0, st.n).map(w => card(w, lineOf(w)))),
+    list.length > st.n ? el('div', { style: 'margin-top:22px' }, el('button', { class: 'ghost', onclick: () => { st.n += 120; render(); } }, `Show ${Math.min(120, list.length - st.n)} more`)) : document.createDocumentFragment());
   render();
+  return box;
+}
+// A line under a detail page's count: the same author, series or genre in the other format.
+async function alsoLine(sec, kind, name, path) {
+  const o = SECTIONS[sec].other;
+  try {
+    const r = await api(`${path}?format=${SECTIONS[o].fmt}`);
+    return r.length ? el('div', { style: 'margin-top:4px' }, el('a', { class: 'also', href: secHref(o, kind, name) }, `Also ${r.length} as ${o === 'audiobooks' ? 'audiobooks' : 'ebooks'} ›`)) : null;
+  } catch { return null; }
+}
+const FILTERS = {
+  ebooks: [['all', 'All'], ['other', 'With audiobook'], ['ready', 'Synced'], ['preparing', 'Syncing'], ['only', 'Ebook only']],
+  audiobooks: [['all', 'All'], ['other', 'With ebook'], ['ready', 'Synced'], ['preparing', 'Syncing'], ['only', 'Audiobook only']],
+};
+const filterOf = { ebooks: 'all', audiobooks: 'all' }; const gridState = { ebooks: { n: 60 }, audiobooks: { n: 60 } };
+const matchFilter = (sec, k, w) => k === 'all' || (k === 'other' ? (sec === 'ebooks' ? w.hasAudio : w.hasEbook) : k === 'only' ? (sec === 'ebooks' ? !w.hasAudio : !w.hasEbook) : w.sync === k);
+async function booksView(sec) {
+  setTab(sec);
+  const [head, all] = await Promise.all([sectionHead(sec, ''), works()]);
+  const list = all.filter(SECTIONS[sec].has); const k = filterOf[sec];
+  const shown = list.filter(w => matchFilter(sec, k, w));
+  show(head,
+    el('div', { class: 'chips' }, FILTERS[sec].map(([key, label]) => el('button', { class: 'chip' + (k === key ? ' on' : ''), 'aria-pressed': String(k === key), onclick: () => { filterOf[sec] = key; gridState[sec].n = 60; booksView(sec); } }, label))),
+    k !== 'all' ? el('div', { class: 'muted' }, plural(shown.length, 'book')) : null,
+    pagedGrid(shown, syncLine, gridState[sec]));
+}
+let searchFilter = 'all'; const searchShown = { n: 60 };
+async function searchView(query) {
+  setTab(null);
+  const list = rows(await api(`/api/works?q=${enc(query)}`));
+  const filters = [['all', 'All'], ['ready', 'Synced'], ['preparing', 'Syncing'], ['ebook', 'Ebook only'], ['audio', 'Audiobook only']];
+  const match = w => searchFilter === 'all' || (searchFilter === 'ebook' ? w.hasEbook && !w.hasAudio : searchFilter === 'audio' ? w.hasAudio && !w.hasEbook : w.sync === searchFilter);
+  const shown = list.filter(match);
+  show(el('h1', {}, `Results for “${query}”`),
+    el('div', { class: 'chips' }, filters.map(([k, label]) => el('button', { class: 'chip' + (searchFilter === k ? ' on' : ''), 'aria-pressed': String(searchFilter === k), onclick: () => { searchFilter = k; searchShown.n = 60; searchView(query); } }, label))),
+    el('div', { class: 'muted' }, plural(shown.length, 'book')),
+    pagedGrid(shown, syncLine, searchShown),
+    !list.length ? el('p', {}, 'Nothing in the library matches.  ', el('a', { href: `#/wanted/ask/${enc(query)}`, style: 'color:var(--accent);font-weight:500' }, 'Ask for it ›')) : null);
 }
 
-async function seriesView() {
-  setTab('series');
-  const list = cache.series || (cache.series = await api('/api/series'));
-  show(el('h1', {}, 'Series'), el('div', { class: 'muted' }, `${list.size || list.length} series`),
-    el('div', { class: 'list' }, list.map(s => listRow(`#/series/${encodeURIComponent(s.name)}`, s.cover ? coverUrl(s.cover) : null, s.name,
-      [s.authors.join(', ') || 'Various authors', `${s.works} ${s.works === 1 ? 'book' : 'books'}`, s.ready ? `${s.ready} synced` : null, s.duration ? fmtHours(s.duration) + ' of audio' : null].filter(Boolean).join('  ·  ')))));
+// Series, authors and narrators as the section sees them: lists and counts within its format.
+const facets = new Map();
+// Kept until the works are read again: whatever invalidates the works (a pairing, a rescan, an edit) starts these over too.
+const facet = (path, fmt) => { if (!cache.works) facets.clear(); const key = `${path}|${fmt}`; return facets.has(key) ? Promise.resolve(facets.get(key)) : api(`${path}?format=${fmt}`).then(r => (facets.set(key, r), r)); };
+async function seriesView(sec) {
+  setTab(sec);
+  const [head, list] = await Promise.all([sectionHead(sec, 'series'), facet('/api/series', SECTIONS[sec].fmt)]);
+  show(head, el('div', { class: 'muted', style: 'margin-top:14px' }, `${list.length} series`),
+    el('div', { class: 'list' }, list.map(s => listRow(secHref(sec, 'series', s.name), s.cover ? coverUrl(s.cover) : null, s.name,
+      [s.authors.join(', ') || 'Various authors', plural(s.works, 'book'), s.ready ? `${s.ready} synced` : null, s.duration ? fmtHours(s.duration) + ' of audio' : null].filter(Boolean).join('  ·  ')))));
 }
-async function seriesPage(name) {
-  setTab('series');
-  const [list, mine, progress] = await Promise.all([api(`/api/series/${encodeURIComponent(name)}`).then(rows), shelf(), api('/api/me/series').catch(() => [])]);
+async function seriesPage(sec, name) {
+  setTab(sec);
+  const fmt = SECTIONS[sec].fmt;
+  const [list, mine, progress, also] = await Promise.all([api(`/api/series/${enc(name)}?format=${fmt}`).then(rows), shelf(), api('/api/me/series').catch(() => []), alsoLine(sec, 'series', name, `/api/series/${enc(name)}`)]);
   const p = progress.find(x => x.name.toLowerCase() === name.toLowerCase());
   const finished = new Set(mine.filter(e => e.state === 'finished').map(e => e.work));
   const entry = id => mine.find(e => e.work === id);
@@ -497,33 +590,72 @@ async function seriesPage(name) {
   const lineOf = w => finished.has(w.id) ? 'Finished' : entry(w.id) ? `On my shelf · ${progressOf(w, entry(w.id).position)}%` : syncLine(w);
   // After the last finished book: the one being read (Reading now) or, once that is finished, the next (Next up).
   const pinId = p?.next || p?.current; const pinned = pinId ? list.find(w => w.id === pinId) : null;
-  show(el('a', { class: 'muted', href: '#/series' }, '‹ Series'), el('h1', { style: 'margin-top:10px' }, name),
-    el('div', { class: 'muted' }, [list.map(w => w.author).filter((a, i, arr) => a && arr.indexOf(a) === i).join(', '), p ? `${p.finished} of ${p.total} finished` : null].filter(Boolean).join('  ·  ')),
+  show(el('a', { class: 'muted', href: `#/${sec}/series` }, '‹ Series'), el('h1', { style: 'margin-top:10px' }, name),
+    el('div', { class: 'muted' }, [list.map(w => w.author).filter((a, i, arr) => a && arr.indexOf(a) === i).join(', '), p ? `${list.filter(w => finished.has(w.id)).length} of ${list.length} finished` : null].filter(Boolean).join('  ·  ')),
+    also,
     pinned ? [el('div', { class: 'section' }, el('h2', {}, p.next ? 'Next up' : 'Reading now')), el('div', { class: 'grid' }, card(numbered(pinned), lineOf(pinned)))] : null,
     pinned ? el('div', { class: 'section' }, el('h2', {}, 'All books'), el('span', { class: 'muted' }, list.length)) : null,
     el('div', { class: 'grid' }, list.map(w => card(numbered(w), lineOf(w)))));
 }
 // Authors and narrators share one shape: a list of people with counts, and a person's books grouped by series.
-async function peopleView(kind) {
-  setTab(kind);
-  const list = cache[kind] || (cache[kind] = await api(`/api/${kind}`));
+async function peopleView(sec, kind) {
+  setTab(sec);
+  const [head, list] = await Promise.all([sectionHead(sec, kind), facet(`/api/${kind}`, SECTIONS[sec].fmt)]);
   const last = n => n.trim().split(/\s+/).pop().toLowerCase();
   const sorted = [...list].sort((a, b) => last(a.name).localeCompare(last(b.name)));
   const one = kind === 'authors' ? 'author' : 'narrator';
-  show(el('h1', {}, kind === 'authors' ? 'Authors' : 'Narrators'), el('div', { class: 'muted' }, `${sorted.length} ${kind}`),
-    el('div', { class: 'list' }, sorted.map(p => listRow(`#/${one}/${encodeURIComponent(p.name)}`, null, p.name, `${p.works} ${p.works === 1 ? 'book' : 'books'}${p.ready ? '  ·  ' + p.ready + ' synced' : ''}`))));
+  show(head, el('div', { class: 'muted', style: 'margin-top:14px' }, `${sorted.length} ${kind}`),
+    el('div', { class: 'list' }, sorted.map(p => listRow(secHref(sec, one, p.name), null, p.name, `${plural(p.works, 'book')}${p.ready ? '  ·  ' + p.ready + ' synced' : ''}`))));
 }
-async function personPage(kind, name) {
-  setTab(kind);
-  const list = rows(await api(`/api/${kind}/${encodeURIComponent(name)}`));
+async function personPage(sec, kind, name) {
+  setTab(sec);
+  const [list, also] = await Promise.all([api(`/api/${kind}/${enc(name)}?format=${SECTIONS[sec].fmt}`).then(rows), kind === 'authors' ? alsoLine(sec, 'author', name, `/api/authors/${enc(name)}`) : null]);
   const groups = new Map();
   for (const w of list) { const k = w.series?.[0]?.name || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(w); }
-  const nodes = [el('a', { class: 'muted', href: `#/${kind}` }, kind === 'authors' ? '‹ Authors' : '‹ Narrators'), el('h1', { style: 'margin-top:10px' }, name), el('div', { class: 'muted' }, `${list.length} ${list.length === 1 ? 'book' : 'books'}${kind === 'narrators' ? ' narrated' : ''}`)];
+  const nodes = [el('a', { class: 'muted', href: `#/${sec}/${kind}` }, kind === 'authors' ? '‹ Authors' : '‹ Narrators'), el('h1', { style: 'margin-top:10px' }, name), el('div', { class: 'muted' }, `${plural(list.length, 'book')}${kind === 'narrators' ? ' narrated' : ''}`), also];
   for (const [k, ws] of [...groups.entries()].sort((a, b) => (a[0] === '') - (b[0] === '') || a[0].localeCompare(b[0]))) {
-    nodes.push(el('div', { class: 'section' }, el('h2', {}, k ? el('a', { href: `#/series/${encodeURIComponent(k)}` }, k) : 'Standalone'), el('span', { class: 'muted' }, ws.length)));
+    nodes.push(el('div', { class: 'section' }, el('h2', {}, k ? el('a', { href: secHref(sec, 'series', k) }, k) : 'Standalone'), el('span', { class: 'muted' }, ws.length)));
     nodes.push(el('div', { class: 'grid' }, ws.sort((a, b) => (a.series?.[0]?.sequence || 0) - (b.series?.[0]?.sequence || 0)).map(w => card(w, syncLine(w)))));
   }
   show(nodes);
+}
+// Genres: the main ones as a list of rows; the rest on request, alphabetically.
+async function genresView(sec) {
+  setTab(sec);
+  const [head, list] = await Promise.all([sectionHead(sec, 'genres'), api(`/api/genres?format=${SECTIONS[sec].fmt}`)]);
+  const main = list.filter(g => g.main), rest = list.filter(g => !g.main).sort((a, b) => a.name.localeCompare(b.name));
+  const rowsOf = gs => el('div', { class: 'glist' }, gs.map(g => el('a', { href: secHref(sec, 'genre', g.name) }, el('span', {}, g.name), el('span', { class: 'muted' }, g.works))));
+  const more = el('div', { hidden: '' }, rowsOf(rest));
+  const toggle = rest.length ? el('button', { class: 'ghost', style: 'margin-top:18px', 'aria-expanded': 'false', onclick: e => { const open = more.hidden; more.hidden = !open; e.currentTarget.setAttribute('aria-expanded', String(open)); e.currentTarget.textContent = open ? 'Show main genres only' : `Show all ${list.length}`; } }, `Show all ${list.length}`) : null;
+  show(head, list.length ? [el('div', { class: 'muted', style: 'margin-top:14px' }, rest.length ? `${main.length} main genres` : plural(list.length, 'genre')), rowsOf(main), toggle, rest.length ? el('div', { style: 'margin-top:18px' }, more) : null]
+    : el('p', { class: 'muted', style: 'margin-top:14px' }, 'No genres are recorded for these books yet.'));
+}
+async function genrePage(sec, name) {
+  setTab(sec);
+  const [list, also] = await Promise.all([api(`/api/genres/${enc(name)}?format=${SECTIONS[sec].fmt}`).then(rows), alsoLine(sec, 'genre', name, `/api/genres/${enc(name)}`)]);
+  show(el('a', { class: 'muted', href: `#/${sec}/genres` }, '‹ Genres'), el('h1', { style: 'margin-top:10px' }, name), el('div', { class: 'muted' }, plural(list.length, 'book')), also,
+    pagedGrid(list, syncLine, { n: 60 }));
+}
+// Addresses from before the sections: the section last used, or the other one when it has nothing under that name.
+async function legacyDetail(kind, name) {
+  const first = lastSection, second = SECTIONS[first].other;
+  let target = first;
+  try { if (!(await api(`/api/${kind === 'series' ? 'series' : 'authors'}/${enc(name)}?format=${SECTIONS[first].fmt}`)).length) target = second; } catch { target = second; }
+  location.replace(secHref(target, kind, name));
+}
+async function sectionRoute(sec, [a, b]) {
+  rememberSection(sec);
+  if ((a === 'narrators' || a === 'narrator') && sec !== 'audiobooks') return location.replace(a === 'narrators' ? '#/audiobooks/narrators' : secHref('audiobooks', 'narrator', b || ''));
+  switch (a) {
+    case 'authors': return peopleView(sec, 'authors');
+    case 'narrators': return peopleView(sec, 'narrators');
+    case 'series': return b ? seriesPage(sec, b) : seriesView(sec);
+    case 'genres': return genresView(sec);
+    case 'author': return b ? personPage(sec, 'authors', b) : peopleView(sec, 'authors');
+    case 'narrator': return b ? personPage(sec, 'narrators', b) : peopleView(sec, 'narrators');
+    case 'genre': return b ? genrePage(sec, b) : genresView(sec);
+    default: return booksView(sec);
+  }
 }
 
 async function bookPage(id) {
@@ -537,24 +669,24 @@ async function bookPage(id) {
   const shelve = async (state, finishedAt) => { await api(`/api/me/shelf/${id}`, { method: 'PUT', body: { state, finishedAt } }); cache.shelf = null; cache.lists = null; toast(state === 'finished' ? 'Marked as finished' : 'On your shelf'); bookPage(id); };
   const unshelve = async () => { await api(`/api/me/shelf/${id}`, { method: 'DELETE' }); cache.shelf = null; toast('Off your shelf'); bookPage(id); };
   const meta = [];
-  if (w.narrators?.length) meta.push(el('div', { class: 'meta' }, 'Read by ', ...w.narrators.flatMap((n, i) => [i ? ', ' : '', el('a', { href: `#/narrator/${encodeURIComponent(n)}` }, n)])));
-  if (w.series?.length) meta.push(el('div', { class: 'meta' }, 'Series: ', ...w.series.flatMap((s, i) => [i ? ', ' : '', el('a', { href: `#/series/${encodeURIComponent(s.name)}` }, s.name + (s.sequence ? ` #${+s.sequence}` : ''))])));
+  if (w.narrators?.length) meta.push(el('div', { class: 'meta' }, 'Read by ', ...w.narrators.flatMap((n, i) => [i ? ', ' : '', el('a', { href: secHref('audiobooks', 'narrator', n) }, n)])));
+  if (w.series?.length) meta.push(el('div', { class: 'meta' }, 'Series: ', ...w.series.flatMap((s, i) => [i ? ', ' : '', el('a', { href: secHref(sectionFor(w), 'series', s.name) }, s.name + (s.sequence ? ` #${+s.sequence}` : ''))])));
   meta.push(el('div', { class: 'meta' }, [w.hasAudio ? fmtClock(w.duration) + ' of audio' : null, w.passages ? w.passages.toLocaleString() + ' sentences' : null, w.publishedYear || null, w.rating ? '★ ' + w.rating.toFixed(1) : null].filter(Boolean).join('  ·  ')));
   const failed = syncFailed(w), syncing = d.shelf === 'preparing' && !failed;
   meta.push(el('div', { class: 'meta' }, w.audioOnly ? el('span', { class: 'good' }, el('span', { class: 'dot' }), 'Audio only · ready to listen') : d.shelf === 'ready' ? el('span', { class: 'good' }, el('span', { class: 'dot' }), `Synced · ${d.sentencesAligned.toLocaleString()} sentences matched`) : d.shelf === 'preparing' ? el('span', {}, el('span', { class: 'dot warn' }), syncLine(w), !failed && w.syncedPercent > 0 ? ` · ${d.units.filter(u => u.done).length} of ${d.units.length} chapters measured` : '') : el('span', {}, el('span', { class: 'dot off' }), w.hasAudio && w.hasEbook ? 'Not synced yet' : w.hasAudio ? 'Audiobook only · pair it with an ebook below' : 'Ebook only · an audiobook would pair')));
-  if (w.genres?.length) meta.push(el('div', { class: 'meta' }, w.genres.join(' · ')));
+  if (w.genres?.length) meta.push(el('div', { class: 'meta' }, ...w.genres.flatMap((g, i) => [i ? ' · ' : '', el('a', { href: secHref(sectionFor(w), 'genre', g) }, g)])));
   if (wanted || inLists.length) meta.push(el('div', { class: 'meta' }, 'In ', ...[...(wanted ? [lists.find(c => c.kind === 'want')] : []), ...inLists].flatMap((c, i) => [i ? ', ' : '', el('a', { href: listHref(c) }, c.name)])));
   if (store.user?.role === 'admin' && w.edited?.length) meta.push(el('div', { class: 'meta' }, `Details edited in Unison: ${w.edited.map(f => ({ publishedYear: 'year', description: 'about' })[f] || f).join(', ')}`));
   const bm = marks.filter(m => m.kind === 'bookmark').length, hl = marks.filter(m => m.kind === 'highlight').length;
   if (bm || hl) meta.push(el('div', { class: 'meta' }, [bm ? `${bm} ${bm === 1 ? 'bookmark' : 'bookmarks'}` : null, hl ? `${hl} ${hl === 1 ? 'highlight' : 'highlights'}` : null].filter(Boolean).join(' · '), ' · in the reader'));
   const chapters = d.tracks.length ? chaptersOf(d) : [];
   const here = pos?.audio ? chapterAt(d, pos.audio) : null;
-  // Sync and pairing: the admin's chores, available to anyone in the household.
+  // Sync and pairing: starting a sync is open to the household; Sync again and Pause syncing are for admins.
   const syncBox = (w.hasAudio && w.hasEbook) ? el('div', { class: 'box' }, el('span', { class: 'caption' }, 'Sync on the server'),
     el('div', { class: 'muted', style: 'font-size:14px' }, d.shelf === 'ready' ? 'Every chapter is measured. Sync again only if the ebook or audiobook file changed.' : failed ? (w.status.startsWith('Failed: only') ? "The server found too little of this book's text in the audiobook, so the text cannot follow the narration. The audiobook may be a different book or edition, or the book is not in English. You can still read it and listen to it." : 'The server could not finish measuring this book.') : syncing ? `${d.units.filter(u => u.done).length} of ${d.units.length} chapters measured so far. The server works through the queue on its own.` : 'Both files are here; the server has not measured this book yet.'),
     el('div', { class: 'actions', style: 'margin-top:12px' },
-      d.shelf === 'ready' || w.status.startsWith('Failed: only') ? el('button', { class: 'ghost', onclick: async e => { if (!confirm('Measure the whole book again? Reading positions are kept.')) return; e.target.disabled = true; await api(`/api/works/${id}/sync?restart=true`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing again'); bookPage(id); } }, 'Sync again') : el('button', { class: 'primary', style: 'padding:9px 16px', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing'); bookPage(id); } }, 'Sync now'),
-      syncing ? el('button', { class: 'ghost', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'DELETE' }).catch(x => toast(x.message)); toast('Pausing after the current chapter'); setTimeout(() => bookPage(id), 1500); } }, 'Pause syncing') : null)) : null;
+      d.shelf === 'ready' || w.status.startsWith('Failed: only') ? (store.user?.role === 'admin' ? el('button', { class: 'ghost', onclick: async e => { if (!confirm('Measure the whole book again? Reading positions are kept.')) return; e.target.disabled = true; await api(`/api/works/${id}/sync?restart=true`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing again'); bookPage(id); } }, 'Sync again') : null) : el('button', { class: 'primary', style: 'padding:9px 16px', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'POST' }).catch(x => toast(x.message)); cache.works = null; toast('Syncing'); bookPage(id); } }, 'Sync now'),
+      syncing && store.user?.role === 'admin' ? el('button', { class: 'ghost', onclick: async e => { e.target.disabled = true; await api(`/api/works/${id}/sync`, { method: 'DELETE' }).catch(x => toast(x.message)); toast('Pausing after the current chapter'); setTimeout(() => bookPage(id), 1500); } }, 'Pause syncing') : null)) : null;
   let pairBox = null;
   if (w.hasAudio && !w.hasEbook && w.audioOnly) {
     pairBox = el('div', { class: 'box' }, el('span', { class: 'caption' }, 'Audio only'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'Marked audio-only: there is no ebook to pair with, and it is ready to listen to as it is.'),
@@ -565,7 +697,7 @@ async function bookPage(id) {
     const search = async () => {
       const all = await works(); const t = q.value.trim().toLowerCase();
       const hits = all.filter(x => x.hasEbook && !x.hasAudio && (!t || `${x.title} ${x.author}`.toLowerCase().includes(t))).slice(0, 12);
-      results.replaceChildren(...(hits.length ? hits.map(x => el('div', { class: 'row', role: 'button', tabindex: '0', onclick: async () => { if (!confirm(`Pair this audiobook with “${x.title}”? The server will rescan and start syncing.`)) return; try { await api(`/api/works/${id}/pair`, { method: 'PUT', body: { ebookWork: x.id } }); cache.works = null; toast('Paired · the server is rescanning'); setTimeout(() => { location.hash = '#/books'; }, 1200); } catch (e) { toast(e.message); } } }, coverOf(x), el('div', { class: 'grow' }, el('div', { class: 't' }, x.title), el('div', { class: 's' }, x.author)), el('span', { class: 'muted' }, 'Pair'))) : [el('p', { class: 'muted', style: 'margin:10px 0 0' }, t ? 'No ebook-only book matches.' : 'Type to search the ebooks that have no audiobook yet.')]));
+      results.replaceChildren(...(hits.length ? hits.map(x => el('div', { class: 'row', role: 'button', tabindex: '0', onclick: async () => { if (!confirm(`Pair this audiobook with “${x.title}”? The server will rescan and start syncing.`)) return; try { await api(`/api/works/${id}/pair`, { method: 'PUT', body: { ebookWork: x.id } }); cache.works = null; toast('Paired · the server is rescanning'); setTimeout(() => { location.hash = '#/audiobooks'; }, 1200); } catch (e) { toast(e.message); } } }, coverOf(x), el('div', { class: 'grow' }, el('div', { class: 't' }, x.title), el('div', { class: 's' }, x.author)), el('span', { class: 'muted' }, 'Pair'))) : [el('p', { class: 'muted', style: 'margin:10px 0 0' }, t ? 'No ebook-only book matches.' : 'Type to search the ebooks that have no audiobook yet.')]));
     };
     q.addEventListener('input', search);
     pairBox = el('div', { class: 'box' }, el('span', { class: 'caption' }, 'Pair with an ebook'), el('p', { class: 'muted', style: 'margin:0 0 10px;font-size:14px' }, 'The scanner could not find this audiobook’s ebook by title and author. Pick it here and the server will pair them and sync.'), el('div', { class: 'inline' }, q), results);
@@ -575,7 +707,7 @@ async function bookPage(id) {
     el('div', { class: 'hero' }, coverOf(w),
       el('div', {},
         el('h1', {}, w.title), w.subtitle ? el('div', { class: 'meta' }, w.subtitle) : null,
-        el('div', { class: 'meta', style: 'font-size:16px' }, ...(w.authors?.length ? w.authors : [w.author]).flatMap((a, i) => [i ? ', ' : '', el('a', { href: `#/author/${encodeURIComponent(a)}` }, a)])),
+        el('div', { class: 'meta', style: 'font-size:16px' }, ...(w.authors?.length ? w.authors : [w.author]).flatMap((a, i) => [i ? ', ' : '', el('a', { href: secHref(sectionFor(w), 'author', a) }, a)])),
         ...meta,
         pos && (pos.passage > 0 || pos.audio > 0) ? el('div', { class: 'progress' }, el('div', { class: 'l' }, el('span', {}, [here ? chapterName(here) : null, pos.audio ? fmtClock(pos.audio) : null].filter(Boolean).join(' · ') || 'Where you are'), el('span', {}, `${pct}% through your story`)), el('div', { class: 'bar' }, el('i', { style: `width:${pct}%` }))) : null,
         el('div', { class: 'actions' },
@@ -616,7 +748,7 @@ async function listenView(id, play) {
     const from = ch && ch.index >= shown ? Math.max(0, ch.index - 4) : 0;
     list.replaceChildren(el('div', { class: 'head' }, el('h2', {}, 'Chapters'), el('span', { class: 'muted', style: 'font-size:13px' }, `${chapters.length} · ${fmtLong(player.total())}`)),
       ...chapters.slice(from, from + shown).map(c => el('div', { class: 'ch' + (ch && ch.index === c.index ? ' on' : ''), role: 'button', tabindex: '0', onclick: () => player.seekTo(c.start) }, el('span', { class: 'n' }, c.index + 1), el('span', { class: 'grow' }, chapterName(c)), el('span', { class: 's' }, fmtClock(c.end - c.start)))),
-      shown < chapters.length ? el('button', { class: 'ghost more', onclick: () => { shown = chapters.length; renderChapters(); } }, `All ${chapters.length} chapters`) : null);
+      shown < chapters.length ? el('button', { class: 'ghost more', onclick: () => { shown = chapters.length; renderChapters(); } }, `All ${chapters.length} chapters`) : document.createDocumentFragment());
   };
   let lastIdx = -2;
   const update = ms => {
@@ -664,13 +796,13 @@ function download(name, text) {
   document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 async function highlightsView() {
-  setTab('highlights');
+  setTab('journal');
   const books = await api('/api/me/marks');
   const count = k => books.reduce((n, b) => n + b.marks.filter(m => m.kind === k).length, 0);
   const md = b => marksMarkdown(b.title, b.author, b.passages, b.marks);
-  const nodes = [el('h1', {}, 'Your highlights')];
-  if (!books.length) { show(nodes, el('p', { class: 'muted' }, 'Nothing marked yet. In a book, select text to highlight it, or bookmark a page with the ribbon.')); return; }
-  nodes.push(el('div', { class: 'muted', style: 'display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, `${count('highlight')} ${count('highlight') === 1 ? 'highlight' : 'highlights'} · ${count('bookmark')} ${count('bookmark') === 1 ? 'bookmark' : 'bookmarks'} · ${books.length} ${books.length === 1 ? 'book' : 'books'}`,
+  const nodes = await sectionHead('journal', 'highlights');
+  if (!books.length) { show(nodes, el('p', { class: 'muted', style: 'margin-top:14px' }, 'Nothing marked yet. In a book, select text to highlight it, or bookmark a page with the ribbon.')); return; }
+  nodes.push(el('div', { class: 'muted', style: 'margin-top:14px;display:flex;gap:14px;align-items:center;flex-wrap:wrap' }, `${count('highlight')} ${count('highlight') === 1 ? 'highlight' : 'highlights'} · ${count('bookmark')} ${count('bookmark') === 1 ? 'bookmark' : 'bookmarks'} · ${books.length} ${books.length === 1 ? 'book' : 'books'}`,
     el('button', { class: 'ghost', onclick: () => download('Unison highlights.md', books.map(md).join('\n---\n\n')) }, 'Download all as Markdown')));
   for (const b of books) {
     nodes.push(el('div', { class: 'section' }, el('h2', {}, el('a', { href: `#/book/${b.work}` }, b.title)), el('span', { class: 'muted' }, b.author), el('span', { style: 'flex:1' }),
@@ -736,7 +868,7 @@ async function drawPoster(canvas, r, name) {
   x.fillStyle = teal; x.fillRect(0, H - 8, W, 8);
 }
 async function yearView(year) {
-  setTab('stats');
+  setTab('journal');
   await sessions.flush(false);
   const r = await api('/api/me/year' + (/^\d{4}$/.test(year || '') ? '/' + year : ''));
   const name = store.user?.name || (await api('/api/me')).user.name;
@@ -771,13 +903,13 @@ async function yearView(year) {
 }
 
 async function statsView() {
-  setTab('stats');
+  setTab('journal');
   await sessions.flush(false);
   const r = cache.stats = await api('/api/me/stats');
   const stat = (label, value) => el('div', { class: 'stat' }, el('b', {}, value), el('span', { class: 'muted' }, label));
   const tot = t => `${fmtHours(t.listenMs)} listening · ${fmtHours(t.readMs)} reading`;
   const days = r.days.slice(-28); const max = Math.max(1, ...days.map(d => d.listenMs + d.readMs));
-  show(el('div', { style: 'display:flex;align-items:baseline;gap:16px;flex-wrap:wrap' }, el('h1', {}, 'Your reading & listening'), el('a', { class: 'outline', href: '#/stats/year', style: 'padding:7px 16px' }, `Your ${new Date().getFullYear()} in review ›`)),
+  show(await sectionHead('journal', 'stats'), el('div', { style: 'margin-top:14px' }, el('a', { class: 'outline', href: '#/stats/year', style: 'padding:7px 16px' }, `Your ${new Date().getFullYear()} in review ›`)),
     el('div', { class: 'stats' }, stat('Today', tot(r.today)), stat('This week', tot(r.week)), stat('This month', tot(r.month)), stat('This year', tot(r.year)), stat('Streak', `${r.streak} days`), stat('Longest streak', `${r.longestStreak} days`), stat('Days with books', r.daysActive), stat('Finished', r.finished)),
     el('div', { class: 'section' }, el('h2', {}, 'Last four weeks'), el('span', { class: 'muted' }, 'a bar per day')),
     el('div', { class: 'days tall' }, days.map(d => el('i', { class: d.listenMs + d.readMs ? '' : 'empty', style: `height:${Math.max(2, (d.listenMs + d.readMs) / max * 100)}%`, title: `${d.date}: ${tot(d)}` }))),
@@ -792,32 +924,15 @@ async function accountView() {
   const isAdmin = me.user.role === 'admin';
   const p0 = el('input', { type: 'password', autocomplete: 'current-password' }), p1 = el('input', { type: 'password', autocomplete: 'new-password' }), p2 = el('input', { type: 'password', autocomplete: 'new-password' });
   const pwMsg = el('div', { class: 'muted', style: 'margin-top:10px;font-size:13px' });
-  const pwForm = el('form', { onsubmit: async e => { e.preventDefault(); if (!p0.value) return pwMsg.textContent = 'Your current password is needed too.'; if (p1.value.length < 8) return pwMsg.textContent = 'Eight characters at least.'; if (p1.value !== p2.value) return pwMsg.textContent = 'The two new entries do not match.'; try { await api('/api/me/password', { method: 'POST', body: { current: p0.value, password: p1.value } }); p0.value = p1.value = p2.value = ''; pwMsg.textContent = 'Password changed. Other devices stay signed in.'; } catch (x) { pwMsg.textContent = x.message; } } },
+  const pwForm = el('form', { onsubmit: async e => { e.preventDefault(); if (!p0.value) return pwMsg.textContent = 'Your current password is needed too.'; if (p1.value.length < 8) return pwMsg.textContent = 'Eight characters at least.'; if (p1.value !== p2.value) return pwMsg.textContent = 'The two new entries do not match.'; try { await api('/api/me/password', { method: 'POST', body: { current: p0.value, password: p1.value } }); p0.value = p1.value = p2.value = ''; pwMsg.textContent = 'Password changed. Your other devices were signed out.'; } catch (x) { pwMsg.textContent = x.message; } } },
     el('label', { class: 'field' }, 'Current password', p0), el('label', { class: 'field' }, 'New password', p1), el('label', { class: 'field' }, 'Again', p2), pwMsg, el('button', { class: 'primary', type: 'submit', style: 'margin-top:14px' }, 'Change password'));
   const mine = store.token.slice(0, 8);
   const devices = el('div', { class: 'list devices' }, me.devices.sort((a, b) => b.lastSeen - a.lastSeen).map(t => el('div', { class: 'row' }, el('div', { class: 'grow' }, el('div', { class: 't' }, t.device || 'A device', t.token.startsWith(mine) ? el('span', { class: 'good', style: 'font-size:12px;margin-left:8px' }, 'this browser') : null), el('div', { class: 's' }, `Last seen ${fmtWhen(t.lastSeen)} · signed in ${fmtDate(t.created)}`)),
     el('button', { class: 'ghost danger', onclick: async e => { if (!confirm(`Sign out ${t.device || 'this device'}?`)) return; await api('/api/me/tokens/' + t.token.slice(0, 8), { method: 'DELETE' }); if (t.token.startsWith(mine)) { store.token = ''; store.user = null; player.close(); route(); } else { toast('Signed out'); accountView(); } } }, t.token.startsWith(mine) ? 'Sign out here' : 'Sign out'))));
   const seg = el('div', { class: 'seg' }, THEMES.map(t => el('button', { class: theme.get() === t ? 'on' : '', onclick: e => { theme.set(t); for (const b of seg.children) b.classList.toggle('on', b === e.currentTarget); } }, { system: 'System', light: 'Light', dark: 'Dark' }[t])));
-  // Wear OS sign-in: the watch shows a six-digit code; typing it here signs the watch in as this person, so no password is typed on the watch.
-  const code = el('input', { type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '7', placeholder: '000 000', style: 'letter-spacing:.14em;max-width:11em' });
-  const linkMsg = el('div', { class: 'muted', style: 'margin-top:10px;font-size:13px' });
-  const linkForm = el('form', { onsubmit: async e => {
-    e.preventDefault(); linkMsg.textContent = '';
-    const digits = code.value.replace(/\D/g, '');
-    if (digits.length !== 6) return linkMsg.textContent = 'The code is six digits.';
-    try {
-      const d = await api('/api/me/link/' + digits);
-      if (!await askBox(`Sign in ${d.device}?`, `${d.device} asked for this code ${fmtWhen(d.created)}, from ${d.address}. It will be signed in as ${me.user.name}, with your shelf and your places. Approve only a code you can see on your own watch.`, 'Sign it in')) return;
-      await api('/api/me/link/' + digits, { method: 'POST' });
-      code.value = ''; toast(`${d.device} is signed in`);
-      // The watch collects its key within a few seconds; then it is in the list.
-      setTimeout(() => { if (location.hash === '#/account' && !document.querySelector('dialog[open]')) accountView(); }, 4000);
-    } catch (x) { linkMsg.textContent = x.message; }
-  } }, el('label', { class: 'field' }, 'Code on the watch', code), linkMsg, el('button', { class: 'primary', type: 'submit', style: 'margin-top:14px' }, 'Continue'));
   const cols = [
     el('div', { class: 'panel' }, el('h2', {}, 'Password'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, `Signed in as ${me.user.name} (${me.user.role}).`), pwForm),
     el('div', { class: 'panel' }, el('h2', {}, 'Signed-in devices'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'Each device keeps its own key. Signing one out only affects that device.'), devices),
-    el('div', { class: 'panel' }, el('h2', {}, 'Wear OS sign-in'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'Open Unison on the watch and type the code it shows. The watch is signed in as you; your password is not typed on it.'), linkForm),
     el('div', { class: 'panel' }, el('h2', {}, 'Look'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'The library pages follow the system, or stay light or dark. The reader has its own papers.'), seg),
   ];
   if (isAdmin) cols.push(el('div', { class: 'panel' }, el('h2', {}, 'Household'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'People, roles, passwords, devices and the server live on the Admin page.'), el('a', { class: 'primary', href: '#/admin', style: 'align-self:flex-start' }, 'Open Admin')));
@@ -826,7 +941,7 @@ async function accountView() {
 
 /* Admin: the household's accounts with what each person has been doing, and the server. */
 async function adminView() {
-  setTab('admin');
+  setTab(null);
   const me = store.user || (await api('/api/me')).user;
   if (me.role !== 'admin') { location.hash = '#/shelf'; return; }
   const [people, health, audit] = await Promise.all([api('/api/users/overview'), api('/api/health'), api('/api/users/audit').catch(() => [])]);
@@ -844,7 +959,7 @@ async function adminView() {
       el('td', {}, hours(o.listenMs), el('div', { class: 'muted', style: 'font-size:12px' }, `listening · ${hours(o.readMs)} reading`)),
       el('td', {}, o.devices ? `${o.devices} ${o.devices === 1 ? 'device' : 'devices'}` : 'none', el('div', { class: 'muted', style: 'font-size:12px' }, o.lastActive ? `active ${fmtWhen(o.lastActive)}` : 'never signed in')),
       el('td', {}, el('div', { class: 'acts' },
-        act('Set password', async () => { const p = prompt(`New password for ${u.name} (eight characters or more):`); if (!p) return; if (p.length < 8) return toast('Eight characters at least'); try { await api(`/api/users/${u.id}/password`, { method: 'POST', body: { password: p } }); toast(`Password set for ${u.name}`); } catch (x) { toast(x.message); } }),
+        act('Set password', async () => { const p = await askBox(`New password for ${u.name}`, 'Eight characters or more.', 'Set password', '', true); if (!p) return; if (p.length < 8) return toast('Eight characters at least'); try { await api(`/api/users/${u.id}/password`, { method: 'POST', body: { password: p } }); toast(`Password set for ${u.name}`); } catch (x) { toast(x.message); } }),
         o.devices ? act(self ? 'Sign out other devices' : 'Sign out everywhere', async () => { if (!confirm(`Sign ${u.name} out of ${o.devices} ${o.devices === 1 ? 'device' : 'devices'}? They sign in again with their password.`)) return; try { const r = await api(`/api/users/${u.id}/tokens`, { method: 'DELETE' }); toast(r.message); if (self) { store.token = ''; store.user = null; route(); return; } refresh(); } catch (x) { toast(x.message); } }) : null,
         act('Reset progress', async () => { if (!confirm(`Reset ${u.name}? Their shelf, finished list, positions, bookmarks and statistics are wiped on the server; the account and its devices stay. This cannot be undone.`)) return; try { const r = await api(`/api/users/${u.id}/data`, { method: 'DELETE' }); toast(r.message); refresh(); } catch (x) { toast(x.message); } }, 'ghost danger'),
         !self && u.id !== 1 ? act('Remove', async () => { if (!confirm(`Remove ${u.name}? Their shelf, positions, marks and statistics go with them. This cannot be undone.`)) return; try { await api(`/api/users/${u.id}`, { method: 'DELETE' }); toast(`${u.name} removed`); refresh(); } catch (x) { toast(x.message); } }, 'ghost danger') : null)));
@@ -857,6 +972,16 @@ async function adminView() {
   const serverPanel = el('div', { class: 'panel wide' }, el('h2', {}, 'Server'),
     el('div', { class: 'serverline' },
       el('div', {}, el('b', {}, health.works), 'books'), el('div', {}, el('b', {}, health.ready), 'read & listen'), el('div', {}, el('b', {}, health.preparing), 'syncing'), el('div', {}, el('b', {}, health.missing), 'one half only'), el('div', {}, el('b', {}, health.version), 'UnisonServer')),
+    ...(health.libraryNotes || []).map(n => {
+      const partial = (health.libraryEmpty || []).includes('partial') && n.includes('were not found at the last check');
+      const lib = partial ? 'partial' : (health.libraryEmpty || []).find(l => n.startsWith(`The ${l} folder is empty`));
+      return el('div', { class: 'inline', style: 'font-size:14px;color:var(--warn);align-items:center;gap:10px;flex-wrap:wrap' }, el('span', {}, n),
+        lib ? el('button', { class: 'ghost', onclick: async ev => {
+          const b = ev.currentTarget;
+          if (!b.dataset.sure) { b.dataset.sure = '1'; b.textContent = partial ? 'Yes, hide the books that were not found' : `Yes, the ${lib} folder is empty on purpose`; return; }
+          try { await api('/api/scan/accept-empty?library=' + lib, { method: 'POST' }); toast('Scanning the library'); setTimeout(refresh, 2500); } catch (x) { toast(x.message); }
+        } }, partial ? 'They were removed on purpose' : 'It is empty on purpose') : null);
+    }),
     syncing.length ? el('div', { class: 'muted', style: 'font-size:13px' }, 'Syncing now: ' + syncing.map(sx => `${sx.title} (${sx.unitsDone}/${sx.units})`).join(', ')) : el('div', { class: 'muted', style: 'font-size:13px' }, 'Nothing syncing right now.'),
     el('div', { style: 'display:flex;gap:10px;flex-wrap:wrap' },
       act('Rescan the library', async () => { try { await api('/api/scan', { method: 'POST' }); toast('Scanning the library; new books appear as the scan finds them'); } catch (x) { toast(x.message); } }, 'primary'),
@@ -877,7 +1002,7 @@ async function adminView() {
 /* Admin → Pairing: every audiobook still waiting for an ebook, with the ebooks by the same author
    offered first; ebooks waiting for audio; and the audiobooks marked audio-only. */
 async function pairingView() {
-  setTab('admin');
+  setTab(null);
   const me = store.user || (await api('/api/me')).user;
   if (me.role !== 'admin') { location.hash = '#/shelf'; return; }
   const o = await api('/api/pairing');
@@ -908,27 +1033,28 @@ async function pairingView() {
       el('div', { class: 'panel wide' }, el('h2', {}, 'Audio-only'), el('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'Listenable as they are; they no longer count as half a book. Clear the mark if an ebook turns up.'),
         o.audioOnly.length ? el('div', { class: 'list' }, o.audioOnly.map(w => el('div', { class: 'row' }, el('div', { class: 'grow' }, el('div', { class: 't' }, el('a', { href: `#/book/${w.id}` }, w.title)), el('div', { class: 's' }, w.author)), el('button', { class: 'ghost', onclick: () => unAudioOnly(w) }, 'Wait for an ebook')))) : el('p', { class: 'muted' }, 'None.')),
       el('div', { class: 'panel wide' }, el('h2', {}, 'Ebooks without audio'), el('span', { class: 'muted' }, `${o.ebookOnly.length} · readable as they are; an audiobook added to the server pairs by title`),
-        el('div', { class: 'grid' }, o.ebookOnly.slice(0, 60).map(w => card(w, w.series?.[0]?.name || ''))), o.ebookOnly.length > 60 ? el('p', { class: 'muted' }, `and ${o.ebookOnly.length - 60} more; the Books tab lists them under Ebook only.`) : null)));
+        el('div', { class: 'grid' }, o.ebookOnly.slice(0, 60).map(w => card(w, w.series?.[0]?.name || ''))), o.ebookOnly.length > 60 ? el('p', { class: 'muted' }, `and ${o.ebookOnly.length - 60} more; the eBooks section lists them under Ebook only.`) : null)));
 }
 
 async function openReader(id, at) {
-  if (!reader.module) reader.module = await import('/reader.js?v=17');
+  if (!reader.module) reader.module = await import('/reader.js?v=19');
   const d = await detail(id, true);
   await loadBookChapters(d);
   // A link to a sentence (#/read/<book>/<sentence>, from the highlights page) opens there, then becomes the plain address so a reload does not jump back.
   const openAt = /^\d+$/.test(at || '') ? Number(at) : null;
   if (openAt !== null) history.replaceState(null, '', `#/read/${id}`);
-  await reader.module.open({ el, api, detail: d, token: store.token, openAt, marksMarkdown, download, player, chapterName, fmtClock, sessions, beacon, places, onPassageForAudio: fn => { reader.passageForAudio = fn; }, close: () => { reader.passageForAudio = null; history.length > 1 ? history.back() : (location.hash = `#/book/${id}`); } });
+  await reader.module.open({ el, api, detail: d, token: store.token, openAt, marksMarkdown, download, player, chapterName, fmtClock, sessions, beacon, places, savePlace, onPassageForAudio: fn => { reader.passageForAudio = fn; }, close: () => { reader.passageForAudio = null; history.length > 1 ? history.back() : (location.hash = `#/book/${id}`); } });
 }
 
 // ---------------------------------------------------------------- Lists: Want to read, collections, the wanted list
 const plural = (n, one, many = one + 's') => `${n} ${n === 1 ? one : many}`;
 async function collections(force) { if (force || !cache.lists) cache.lists = await api('/api/me/collections'); return cache.lists; }
 // A question in the page's own dialog. `input`: a text field with that value; resolves its text, true, or null when dismissed.
-function askBox(title, text, okLabel, input) {
+// `secret`: the field is a password field (hidden as typed, never offered to a password manager as a sign-in).
+function askBox(title, text, okLabel, input, secret) {
   return new Promise(resolve => {
     const dlg = el('dialog', { class: 'ask' });
-    const field = input !== undefined ? el('input', { type: 'text', value: input, maxlength: '60', 'aria-label': title }) : null;
+    const field = input !== undefined ? (secret ? el('input', { type: 'password', autocomplete: 'new-password', 'aria-label': title }) : el('input', { type: 'text', value: input, maxlength: '60', 'aria-label': title })) : null;
     const done = v => { dlg.close(); dlg.remove(); resolve(v); };
     dlg.append(el('form', { onsubmit: e => { e.preventDefault(); done(field ? field.value : true); } }, el('h2', {}, title), text ? el('p', {}, text) : null, field ? el('label', { class: 'field', style: 'margin-top:0' }, field) : null,
       el('div', { class: 'acts' }, el('button', { class: 'ghost', type: 'button', onclick: () => done(null) }, 'Cancel'), el('button', { class: 'primary', type: 'submit', style: 'padding:9px 18px' }, okLabel))));
@@ -938,13 +1064,13 @@ function askBox(title, text, okLabel, input) {
 }
 const listHref = c => `#/lists/${c.kind === 'want' ? 'want' : c.id}`;
 async function listsView() {
-  setTab('lists');
+  setTab('journal');
   const [all, lists] = await Promise.all([works(), collections(true)]);
   const byId = new Map(all.map(w => [w.id, w]));
   const name = el('input', { type: 'text', maxlength: '60', placeholder: 'A new collection', 'aria-label': 'Name of a new collection' });
   const form = el('form', { class: 'inline', style: 'margin-top:18px;max-width:520px', onsubmit: async e => { e.preventDefault(); if (!name.value.trim()) return name.focus(); try { const c = await api('/api/me/collections', { method: 'POST', body: { name: name.value } }); cache.lists = null; location.hash = `#/lists/${c.id}`; } catch (x) { toast(x.message); } } },
     name, el('button', { class: 'primary', type: 'submit', style: 'padding:9px 18px' }, 'Make collection'));
-  show(el('div', { style: 'display:flex;align-items:baseline;gap:16px;flex-wrap:wrap' }, el('h1', {}, 'Your lists'), el('a', { class: 'outline', href: '#/wanted', style: 'padding:7px 16px' }, 'The wanted list ›')),
+  show(await sectionHead('journal', 'lists'), el('div', { style: 'margin-top:14px' }, el('a', { class: 'outline', href: '#/wanted', style: 'padding:7px 16px' }, 'The wanted list ›')),
     form,
     el('div', { class: 'list', style: 'margin-top:22px' }, lists.map(c => {
       const first = c.works.map(id => byId.get(id)).find(w => w?.cover);
@@ -952,7 +1078,7 @@ async function listsView() {
     })));
 }
 async function listPage(key) {
-  setTab('lists');
+  setTab('journal');
   const [all, lists, mine] = await Promise.all([works(), collections(true), shelf()]);
   const c = lists.find(x => key === 'want' ? x.kind === 'want' : String(x.id) === key);
   const back = el('a', { class: 'muted', href: '#/lists' }, '‹ Your lists');
@@ -1005,7 +1131,7 @@ async function lookupFor(words) {
 }
 // One book the lookup found: everything the catalogue says about it, what the server has, and the way to ask for it.
 async function foundPage(index) {
-  setTab('lists');
+  setTab('journal');
   const f = lookup.found[index]; if (!f) { location.hash = '#/wanted'; return; }
   const b = f.book; const whole = f.work && f.hasEbook && f.hasAudio;
   const kind = el('select', { 'aria-label': 'Which form to ask for' }, Object.entries(KINDS).map(([k, v]) => el('option', { value: k }, v)));
@@ -1050,7 +1176,7 @@ async function announceArrivals() {
 
 // The wanted list: books the library does not have yet. Anyone asks; an admin settles; the scanner notices arrivals.
 async function wantedView(prefill) {
-  setTab('lists');
+  setTab('journal');
   const me = store.user || (await api('/api/me')).user; const isAdmin = me.role === 'admin';
   const [r, all] = await Promise.all([api('/api/requests'), works()]);
   const byId = new Map(all.map(w => [w.id, w]));
@@ -1089,7 +1215,7 @@ async function wantedView(prefill) {
         l.found.length ? el('div', { class: 'list' }, l.found.map((f, i) => el('a', { class: 'row', href: `#/wanted/found/${i}` }, lookupCover(f.book.cover),
           el('div', { class: 'grow' }, el('div', { class: 't' }, f.book.title),
             el('div', { class: 's' }, [f.book.authors.join(', ') || 'Unknown author', f.book.series[0] ? f.book.series[0].name + (f.book.series[0].sequence ? ` #${+f.book.series[0].sequence}` : '') : null].filter(Boolean).join('  ·  ')),
-            el('div', { class: 's' }, el('span', { class: f.work ? 'good' : '' }, haveLine(f)), `  ·  ${[f.book.publishedYear, 'from ' + f.book.source].filter(Boolean).join(' · ')}`))))) : null);
+            el('div', { class: 's' }, el('span', { class: f.work ? 'good' : '' }, haveLine(f)), `  ·  ${[f.book.publishedYear, 'from ' + f.book.source].filter(Boolean).join(' · ')}`))))) : document.createDocumentFragment());
       if (!l.found.length) byTitle.open = true;
     }).catch(x => { if (results.isConnected) { results.replaceChildren(el('p', { class: 'err' }, x.message)); byTitle.open = true; } });
   }
@@ -1102,7 +1228,7 @@ async function wantedView(prefill) {
 
 // The metadata overlay (admins): corrections kept in Unison's catalogue, over what Calibre and the audiobook folders say.
 async function metaView(id) {
-  setTab('books');
+  setTab(null);
   const me = store.user || (await api('/api/me')).user;
   if (me.role !== 'admin') { location.hash = `#/book/${id}`; return; }
   const v = await api(`/api/works/${id}/meta`); const w = norm(v.current), src = v.source;
@@ -1114,7 +1240,7 @@ async function metaView(id) {
   const F = { title: text(w.title), subtitle: text(w.subtitle), authors: area(w.authors.join('\n'), 2), narrators: area(w.narrators.join('\n'), 2), series: area(seriesText(w.series), 2),
     publishedYear: text(w.publishedYear, { maxlength: '4', inputmode: 'numeric' }), publisher: text(w.publisher), language: text(w.language), genres: text(w.genres.join(', ')), description: area(w.description, 8) };
   const said = { title: src.title, subtitle: src.subtitle, authors: src.authors.join(', '), narrators: src.narrators.join(', '), series: seriesText(src.series).replace(/\n/g, ', '), publishedYear: src.publishedYear, publisher: src.publisher, language: src.language, genres: src.genres.join(', '), description: src.description.length > 140 ? src.description.slice(0, 140) + '…' : src.description };
-  const forget = () => { cache.works = null; cache.series = null; cache.authors = null; cache.narrators = null; cache.details.delete(id); };
+  const forget = () => { cache.works = null; facets.clear(); cache.details.delete(id); };
   const reset = async key => { try { await api(`/api/works/${id}/meta`, { method: 'PUT', body: { reset: [key] } }); forget(); toast('Back to what the library says'); metaView(id); } catch (x) { toast(x.message); } };
   const field = (label, key, hint) => el('label', { class: 'field' }, label, hint ? el('span', { class: 'hint' }, ' · ' + hint) : null, F[key],
     w.edited.includes(key) ? el('span', { class: 'was' }, `The library says: ${said[key] || 'nothing'}  `, el('button', { type: 'button', class: 'link', onclick: () => reset(key) }, 'Put that back')) : null);
@@ -1162,14 +1288,35 @@ async function metaView(id) {
           el('form', { class: 'inline', onsubmit: look }, lt, la, el('button', { class: 'ghost', type: 'submit' }, 'Look up')), results))));
 }
 
+// ---------------------------------------------------------------- The name button: a link to Account, or for an admin a small menu
+function drawWho() {
+  const u = store.user; const name = u?.name || '…'; const admin = u?.role === 'admin';
+  for (const b of [$('#who'), $('#whoBtn')]) { $('span', b).textContent = name; $('i', b).textContent = name[0].toUpperCase(); }
+  $('#who').hidden = admin; $('#whoBtn').hidden = !admin;
+  if (!admin) closeWhoMenu();
+}
+function closeWhoMenu(focusButton) { const m = $('#whoMenu'); if (m.hidden) return; m.hidden = true; $('#whoBtn').setAttribute('aria-expanded', 'false'); if (focusButton) $('#whoBtn').focus(); }
+function openWhoMenu() { $('#whoMenu').hidden = false; $('#whoBtn').setAttribute('aria-expanded', 'true'); $('#whoMenu a').focus(); }
+$('#whoBtn').onclick = () => $('#whoMenu').hidden ? openWhoMenu() : closeWhoMenu(true);
+$('#whoMenu').addEventListener('click', () => closeWhoMenu());
+$('#whoMenu').addEventListener('keydown', e => {
+  const items = [...document.querySelectorAll('#whoMenu a')]; const i = items.indexOf(document.activeElement);
+  if (e.key === 'ArrowDown') { e.preventDefault(); items[(i + 1) % items.length].focus(); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); items[(i + items.length - 1) % items.length].focus(); }
+  else if (e.key === 'Tab') closeWhoMenu();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#whoMenu').hidden) closeWhoMenu(true); });
+document.addEventListener('click', e => { if (!$('#whoBox').contains(e.target)) closeWhoMenu(); });
+
 // ---------------------------------------------------------------- Routing
 async function route() {
   if (!store.token) return signIn();
   // Browsers signed in before the cookie existed get one now, so covers and audio keep loading.
   if (!localStorage.getItem('unison.cookie')) { try { await api('/api/me/cookie', { method: 'POST' }); localStorage.setItem('unison.cookie', '1'); } catch {} }
-  $('#top').hidden = false; const who = store.user?.name || '…'; $('#who span').textContent = who; $('#who i').textContent = who[0].toUpperCase();
-  $('#adminTab').hidden = store.user?.role !== 'admin';
-  if (!store.user) api('/api/me').then(m => { store.user = m.user; $('#who span').textContent = m.user.name; $('#who i').textContent = m.user.name[0].toUpperCase(); $('#adminTab').hidden = m.user.role !== 'admin'; }).catch(() => {});
+  $('#top').hidden = false;
+  drawWho();
+  if (!store.user) api('/api/me').then(m => { store.user = m.user; drawWho(); }).catch(() => {});
+  closeWhoMenu();
   const parts = location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
   document.body.classList.toggle('reading', parts[0] === 'read');
   if (parts[0] !== 'read') announceArrivals();
@@ -1177,13 +1324,16 @@ async function route() {
   if (pageTeardown) { pageTeardown(); pageTeardown = null; }
   try {
     switch (parts[0]) {
-      case 'books': return await booksView();
-      case 'search': return await booksView(parts[1] || '');
-      case 'series': return parts[1] ? await seriesPage(parts[1]) : await seriesView();
-      case 'authors': return await peopleView('authors');
-      case 'author': return await personPage('authors', parts[1]);
-      case 'narrators': return await peopleView('narrators');
-      case 'narrator': return await personPage('narrators', parts[1]);
+      case 'ebooks': case 'audiobooks': return await sectionRoute(parts[0], parts.slice(1));
+      case 'search': return await searchView(parts[1] || '');
+      case 'journal': return location.replace('#/lists');
+      // Addresses from before the sections.
+      case 'books': return location.replace('#/ebooks');
+      case 'authors': return location.replace('#/ebooks/authors');
+      case 'narrators': return location.replace('#/audiobooks/narrators');
+      case 'narrator': return location.replace(secHref('audiobooks', 'narrator', parts[1] || ''));
+      case 'series': return parts[1] ? await legacyDetail('series', parts[1]) : location.replace('#/ebooks/series');
+      case 'author': return parts[1] ? await legacyDetail('author', parts[1]) : location.replace('#/ebooks/authors');
       case 'book': return parts[2] === 'edit' ? await metaView(parts[1]) : await bookPage(parts[1]);
       case 'lists': return parts[1] ? await listPage(parts[1]) : await listsView();
       case 'wanted': return parts[1] === 'found' ? await foundPage(+parts[2]) : await wantedView(parts[1] === 'ask' ? parts[2] : '');
@@ -1198,6 +1348,6 @@ async function route() {
   } catch (x) { show(el('p', { class: 'err' }, x.message)); }
 }
 window.addEventListener('hashchange', route);
-$('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#search').value.trim(); location.hash = q ? `#/search/${encodeURIComponent(q)}` : '#/books'; };
+$('#searchForm').onsubmit = e => { e.preventDefault(); const q = $('#search').value.trim(); location.hash = q ? `#/search/${encodeURIComponent(q)}` : `#/${lastSection}`; };
 route();
 })();

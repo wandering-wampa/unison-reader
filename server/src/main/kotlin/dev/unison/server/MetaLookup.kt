@@ -26,6 +26,8 @@ import org.json.JSONObject
  */
 class MetaLookup(private val audible: String = "https://api.audible.com", private val openLibrary: String = "https://openlibrary.org") {
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).followRedirects(HttpClient.Redirect.NORMAL).build()
+    /** For covers, whose redirects are followed by hand in [followCover] so that every hop is checked. */
+    private val noRedirects = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).followRedirects(HttpClient.Redirect.NEVER).build()
     private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
     private fun get(url: String): String {
         val r = http.send(HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(15)).header("Accept", "application/json").header("User-Agent", "UnisonServer").build(), HttpResponse.BodyHandlers.ofString())
@@ -113,16 +115,44 @@ class MetaLookup(private val audible: String = "https://api.audible.com", privat
 
     /** The bytes of a cover a lookup offered, and whether it is a PNG (else a JPEG). The admin's browser shows candidates through this, since the page loads images from here only. */
     fun image(url: String): Pair<ByteArray, Boolean> {
-        val uri = runCatching { URI.create(url) }.getOrNull() ?: throw IllegalArgumentException("Not an address")
-        require(uri.scheme == "https" && uri.host != null && COVER_HOSTS.any { uri.host == it || uri.host.endsWith(".$it") }) { "Covers come from Audible or Open Library only" }
-        val r = http.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(20)).header("User-Agent", "UnisonServer").build(), HttpResponse.BodyHandlers.ofByteArray())
-        require(r.statusCode() == 200) { "The cover's host answered ${r.statusCode()}" }
-        val bytes = r.body()
+        val bytes = followCover(url) { uri ->
+            val r = noRedirects.send(HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(20)).header("User-Agent", "UnisonServer").build(), HttpResponse.BodyHandlers.ofByteArray())
+            CoverResponse(r.statusCode(), r.headers().firstValue("Location").orElse(null), r.body())
+        }
         require(bytes.size in 1000..8_000_000) { "That is not a usable cover" }
         val png = bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte(); val jpeg = bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte()
         require(png || jpeg) { "That is not a JPEG or PNG" }
         return bytes to png
     }
 
-    companion object { val COVER_HOSTS = listOf("media-amazon.com", "ssl-images-amazon.com", "covers.openlibrary.org", "archive.org") }
+    /** What one request for a cover answered: the status, the `Location` header if any, and the body. */
+    class CoverResponse(val status: Int, val location: String?, val body: ByteArray)
+
+    /**
+     * Fetches a cover through `send`, following redirects by hand: at most [MAX_COVER_HOPS] of them, and every address,
+     * the first and each redirect target, must be https on one of [COVER_HOSTS] (or a subdomain) before it is requested.
+     */
+    internal fun followCover(url: String, send: (URI) -> CoverResponse): ByteArray {
+        var uri = runCatching { URI.create(url) }.getOrNull() ?: throw IllegalArgumentException("Not an address")
+        var hops = 0
+        while (true) {
+            val host = uri.host
+            require(uri.scheme == "https" && host != null && COVER_HOSTS.any { host == it || host.endsWith(".$it") }) { "Covers come from Audible or Open Library only" }
+            val r = send(uri)
+            if (r.status in REDIRECTS) {
+                require(++hops <= MAX_COVER_HOPS) { "The cover's address redirects too often" }
+                val next = r.location?.let { l -> runCatching { uri.resolve(l) }.getOrNull() } ?: throw IllegalArgumentException("The cover's host redirected nowhere")
+                uri = next
+                continue
+            }
+            require(r.status == 200) { "The cover's host answered ${r.status}" }
+            return r.body
+        }
+    }
+
+    companion object {
+        val COVER_HOSTS = listOf("media-amazon.com", "ssl-images-amazon.com", "covers.openlibrary.org", "archive.org")
+        const val MAX_COVER_HOPS = 5
+        private val REDIRECTS = setOf(301, 302, 303, 307, 308)
+    }
 }

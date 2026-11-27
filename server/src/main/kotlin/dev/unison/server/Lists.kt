@@ -147,7 +147,19 @@ class Lists(private val db: Connection) {
         if (external != null && query("SELECT 1 FROM requests WHERE external = ?", external) { 1 }.isNotEmpty()) return null
         val same = query("SELECT id, title, author FROM requests WHERE status = 'wanted'") { Triple(it.getLong(1), it.getString(2), it.getString(3)) }
             .firstOrNull { Scanner.titleKey(it.second) == Scanner.titleKey(t) && (a.isBlank() || it.third.isBlank() || Scanner.authorKey(it.third) == Scanner.authorKey(a)) }
-        if (same != null && Scanner.titleKey(t).isNotBlank()) return request(same.first, user ?: -1)
+        if (same != null && Scanner.titleKey(t).isNotBlank()) {
+            // The existing request answers, but what this ask adds is kept: a wider kind, and a note it did not already have.
+            val (storedKind, storedNote) = query("SELECT kind, note FROM requests WHERE id = ?", same.first) { it.getString(1) to it.getString(2) }.first()
+            val widened = if (kind == storedKind) storedKind else "both"
+            val extra = note.trim()
+            val joined = if (extra.isBlank() || storedNote.contains(extra)) storedNote else if (storedNote.isBlank()) extra else "$storedNote\n$extra"
+            val newNote = if (joined.length <= 500) joined else storedNote
+            if (widened != storedKind || newNote != storedNote) {
+                exec("UPDATE requests SET kind = ?, note = ? WHERE id = ?", widened, newNote, same.first)
+                requestsChanged()
+            }
+            return request(same.first, user ?: -1)
+        }
         exec("INSERT INTO requests (user, requester, title, author, note, kind, source, external, created) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", user, requester.take(60), t, a, note.trim(), kind, source, external, System.currentTimeMillis())
         requestsChanged()
         return query("SELECT * FROM requests ORDER BY id DESC LIMIT 1") { request(it, user ?: -1) }.first()

@@ -13,6 +13,9 @@ import androidx.media3.session.*
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** The screen, for the one case the playback service cannot decide alone: the reader is open on a book and another device's newer place has come. */
+interface PlaceAsker { fun readerOpenOn(bookId: String): Boolean; fun ask(bookId: String, remote: ServerClient.Position) }
+
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 class PlaybackService : MediaLibraryService() {
     private lateinit var player: ExoPlayer
@@ -21,6 +24,24 @@ class PlaybackService : MediaLibraryService() {
     private lateinit var state: ReadingState
     private val handler = Handler(Looper.getMainLooper())
     private var book: Book? = null
+    /** The book that has played on this device since the service started; one paused after that is started from where it stopped. */
+    @Volatile private var playedHere: String? = null
+    @Volatile private var lastPlayedAt = 0L
+    /** True while a server book is playing here, or stopped here less than [freshMs] ago: its place on this device is the newest, so nothing is asked of the server. */
+    private fun fresh(id: String) = playedHere == id && (player.isPlaying || SystemClock.elapsedRealtime() - lastPlayedAt < freshMs)
+
+    /**
+     * Play arriving through the media session (headphones, lock screen, notification, watch, car) on a loaded, paused
+     * server book that has not played here lately: the server is asked first (see `placeFirst`), then it plays. True
+     * when the press was taken (or is already waiting), so the caller must not play now.
+     */
+    private fun placeThenPlay(): Boolean {
+        val id = book?.id ?: return false
+        if (waitingBook == id) return true
+        if (state.serverWork(id) == null || player.isPlaying || startingNow() || fresh(id)) return false
+        placeFirst(id) { moved -> if (book?.id == id) { if (moved) seek(state.audio(id)); player.play() } }
+        return true
+    }
 
     // ---- Sleep timer: a length of time or the end of the chapter. The last seconds fade out; a shake while it runs
     // extends it (the length again, or to the end of the following chapter), and a shake within two minutes after it
@@ -149,6 +170,8 @@ class PlaybackService : MediaLibraryService() {
                         object : Player.Listener {
                             override fun onIsPlayingChanged(isPlaying: Boolean) {
                                 isPlayingSnapshot = isPlaying
+                                if (isPlaying) playedHere = book?.id
+                                lastPlayedAt = SystemClock.elapsedRealtime()
                                 if (isPlaying) { if (listenStart == 0L) listenStart = System.currentTimeMillis(); book?.id?.let { state.listened(it, System.currentTimeMillis()) } } else { closeListening(); persist(); sendPlace() }
                                 // Played on by hand after the timer stopped it: the shake window closes.
                                 if (isPlaying && !sleepActive() && sleepEndedAt > 0) { sleepEndedAt = 0; listenForShake(false) }
@@ -179,6 +202,10 @@ class PlaybackService : MediaLibraryService() {
             private val hidden = Player.Commands.Builder().addAll(Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM).build()
             override fun getAvailableCommands(): Player.Commands { val b = super.getAvailableCommands().buildUpon(); for (i in 0 until hidden.size()) b.remove(hidden.get(i)); return b.build() }
             override fun isCommandAvailable(command: Int) = !hidden.contains(command) && super.isCommandAvailable(command)
+            // Every controller's play passes here; the app's own start (`start()`) plays the wrapped player directly. Pause is never held back.
+            override fun play() { if (!placeThenPlay()) super.play() }
+            override fun setPlayWhenReady(playWhenReady: Boolean) { if (playWhenReady) { if (!placeThenPlay()) super.setPlayWhenReady(true) } else { cancelWait(); super.setPlayWhenReady(false) } }
+            override fun pause() { cancelWait(); super.pause() }
         }
         session =
             MediaLibrarySession.Builder(this, sessionPlayer,
@@ -221,12 +248,15 @@ class PlaybackService : MediaLibraryService() {
                                         IllegalStateException("Import audio first")
                                     )
                             book = selected
-                            val (index, position) = startOf(selected, state.audio(selected.id))
-                            // Resumed after a restart: the book's own speed, as when it is started from the app.
-                            handler.post { if (book?.id == selected.id) player.setPlaybackSpeed(state.speed(selected.id)) }
-                            return com.google.common.util.concurrent.Futures.immediateFuture(
-                                MediaSession.MediaItemsWithStartPosition(itemsFor(selected), index, position)
-                            )
+                            val future = com.google.common.util.concurrent.SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+                            // Nothing is loaded and nothing played here: another device may have moved a server book on.
+                            placeFirst(selected.id) { _ ->
+                                val (index, position) = startOf(selected, state.audio(selected.id))
+                                // Resumed after a restart: the book's own speed, as when it is started from the app.
+                                handler.post { if (book?.id == selected.id) player.setPlaybackSpeed(state.speed(selected.id)) }
+                                future.set(MediaSession.MediaItemsWithStartPosition(itemsFor(selected), index, position))
+                            }
+                            return future
                         }
 
                         // ---- The library a car (Android Auto) or another media browser sees: My shelf, Recent, Series.
@@ -415,6 +445,8 @@ class PlaybackService : MediaLibraryService() {
                 .build(),
         )
         val selected = db.load(intent.getStringExtra("book") ?: state.active)
+        // A second press (or a pause) while the book waits for the server's answer takes the first press back.
+        if (selected != null && waitingBook == selected.id && (command == "toggle" || command == "pause")) { cancelWait(); startingSnapshot = false; askedAt = 0; return START_NOT_STICKY }
         if (selected == null || selected.tracks.isEmpty()) {
             askedAt = 0
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -438,6 +470,16 @@ class PlaybackService : MediaLibraryService() {
             val id = selected.id
             kotlin.concurrent.thread { if (Server.pullSpeed(this, id)) handler.post { if (book?.id == id) player.setPlaybackSpeed(state.speed(id)) } }
         }
+        // Starting from the place this device last held: another device may have moved the book on since. Not when it is
+        // already playing, when it was paused after playing here, or when the person chose a place.
+        val fromHere = command == "toggle" || (command == "play" && intent.getLongExtra("position", -1) < 0)
+        val wait = fromHere && !(player.isPlaying || startingNow()) && !(!switched && fresh(selected.id))
+        if (wait) placeFirst(selected.id) { moved -> if (book?.id == selected.id) { if (moved) seek(state.audio(selected.id)); act(command, intent, selected, switched) } }
+        else act(command, intent, selected, switched)
+        return START_NOT_STICKY
+    }
+
+    private fun act(command: String, intent: Intent, selected: Book, switched: Boolean) {
         when (command) {
             "play" -> {
                 val position = intent.getLongExtra("position", -1)
@@ -460,7 +502,40 @@ class PlaybackService : MediaLibraryService() {
         // From here on the player itself says whether it is starting; the press no longer has to.
         startingSnapshot = startingNow(); askedAt = 0
         persist()
-        return START_NOT_STICKY
+    }
+
+    private val startTicket = java.util.concurrent.atomic.AtomicInteger()
+
+    private fun cancelWait() { startTicket.incrementAndGet(); waitingBook = null }
+
+    /**
+     * Runs `then` (on the main thread) once a server book's newest place has been looked for, so it starts from the right
+     * place and not from one another device has since moved (this device would send it back and lose it). A book that is
+     * not a server book starts at once, in this call. The wait is capped at [PLACE_WAIT_MS]: no network or a slow server
+     * starts from this device's place, and an answer that comes later is dropped, never applied. A place that is newer
+     * with nothing moved here is taken (`then(true)`) unless the reader is open on the book: the text never moves for
+     * another device, so the question is asked there and this device's place plays meanwhile. Apart or nothing: this
+     * device's place.
+     */
+    private fun placeFirst(id: String, after: (moved: Boolean) -> Unit) {
+        if (state.serverWork(id) == null || state.serverToken.isBlank()) { after(false); return }
+        // The place counts as settled from now: the play the session sends right after a resumption does not ask a second time.
+        val then = { moved: Boolean -> playedHere = id; lastPlayedAt = SystemClock.elapsedRealtime(); after(moved) }
+        val ticket = startTicket.get()
+        waitingBook = id
+        val finish = { moved: Boolean -> handler.post { waitingBook = null; then(moved) } }
+        handler.postDelayed({ if (startTicket.compareAndSet(ticket, ticket + 1)) { waitingBook = null; then(false) } }, PLACE_WAIT_MS)
+        kotlin.concurrent.thread {
+            val pulled = runCatching { Server.sync(this, id) }.getOrDefault(Server.Pulled.Nothing)
+            if (pulled !is Server.Pulled.Newer) { if (startTicket.compareAndSet(ticket, ticket + 1)) finish(false); return@thread }
+            val open = java.util.concurrent.FutureTask { placeAsker?.readerOpenOn(id) == true }
+            handler.post(open)
+            val readerOpen = runCatching { open.get(PLACE_WAIT_MS, java.util.concurrent.TimeUnit.MILLISECONDS) }.getOrDefault(true)
+            if (!startTicket.compareAndSet(ticket, ticket + 1)) return@thread
+            if (readerOpen) { handler.post { waitingBook = null; placeAsker?.ask(id, pulled.remote); then(false) }; return@thread }
+            runCatching { Server.keepRemote(this, id, pulled.remote) }
+            finish(true)
+        }
     }
 
     private fun startingNow() = player.playWhenReady && !player.isPlaying && player.playerError == null && player.playbackState == Player.STATE_BUFFERING
@@ -573,6 +648,14 @@ class PlaybackService : MediaLibraryService() {
         @Volatile private var startingSnapshot = false
         @Volatile private var askedAt = 0L
         @Volatile private var askedBook: String? = null
+        /** The book whose start is waiting for the server's newest place (see `placeFirst`). */
+        @Volatile private var waitingBook: String? = null
+        private const val PLACE_WAIT_MS = 3000L
+        /** How long after it stopped here a server book still starts from this device's place without asking the server (tests set it). */
+        @Volatile var freshMs = 120_000L
+
+        /** Set by the screen while it is open (see [PlaceAsker]). */
+        @Volatile var placeAsker: PlaceAsker? = null
 
         /**
          * True from the press that asks this book to play until sound comes, the start is taken back, or it fails: the
@@ -580,9 +663,10 @@ class PlaybackService : MediaLibraryService() {
          * counts until the service has acted on it (five seconds at most); after that the player says.
          */
         fun starting(book: String): Boolean =
-            (askedAt > 0 && askedBook == book && SystemClock.elapsedRealtime() - askedAt < 5000) || (instance?.book?.id == book && startingSnapshot)
+            waitingBook == book || (askedAt > 0 && askedBook == book && SystemClock.elapsedRealtime() - askedAt < 5000) || (instance?.book?.id == book && startingSnapshot)
 
         /** Apps that may browse and control playback besides this one and the system: Android Auto and its simulator, the Wear OS and Pixel Watch apps, Google Assistant, Bluetooth. */
+        // The Wear OS and Pixel Watch packages let any watch show the phone's media controls.
         private val CONTROLLERS = setOf(
             "com.google.android.projection.gearhead", "com.google.android.autosimulator", "com.google.android.carassistant",
             "com.google.android.wearable.app", "com.google.android.apps.wear.companion", "com.google.android.googlequicksearchbox", "com.android.bluetooth", "com.google.android.bluetooth",
@@ -601,6 +685,7 @@ class PlaybackService : MediaLibraryService() {
         fun forget() {
             val s = instance ?: return
             s.listenStart = 0
+            s.cancelWait()
             s.book = null
             runCatching { s.player.stop(); s.player.clearMediaItems() }
             isPlayingSnapshot = false
@@ -631,7 +716,7 @@ class PlaybackService : MediaLibraryService() {
         ) {
             when (command) {
                 "play" -> { askedBook = book; askedAt = SystemClock.elapsedRealtime() }
-                "toggle" -> if (playingBook() == book && (playing() || starting(book))) askedAt = 0 else { askedBook = book; askedAt = SystemClock.elapsedRealtime() }
+                "toggle" -> if (waitingBook == book || playingBook() == book && (playing() || starting(book))) askedAt = 0 else { askedBook = book; askedAt = SystemClock.elapsedRealtime() }
                 "pause" -> askedAt = 0
             }
             context.startForegroundService(

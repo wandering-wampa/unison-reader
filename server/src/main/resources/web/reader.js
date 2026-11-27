@@ -86,7 +86,7 @@ export async function open(ctx) {
   const narrating = () => player.work?.id === work.id;
   const audioNow = () => narrating() ? player.globalMs() : (detail.position?.audio || 0);
   current = {
-    teardown() { state.destroyed = true; document.removeEventListener('visibilitychange', checkElsewhere); state.unsub?.(); clearInterval(state.timer); push(false); if (sessions.open?.kind === 'read') sessions.end(); onPassageForAudio(null); document.body.classList.remove('reading'); try { view.close?.(); } catch {} },
+    teardown() { state.destroyed = true; document.removeEventListener('visibilitychange', checkElsewhere); window.removeEventListener('online', retryPush); state.unsub?.(); clearInterval(state.timer); push(false); if (sessions.open?.kind === 'read') sessions.end(); onPassageForAudio(null); document.body.classList.remove('reading'); try { view.close?.(); } catch {} },
     beacon() { if (`${state.passage}:${audioNow()}` !== state.lastPushed) ctx.beacon(`/api/works/${work.id}/position`, { passage: state.passage, audio: audioNow() }, narrating() && player.isPlaying() ? undefined : places?.known.get(work.id)); },
   };
   // Reading time counts while the page is open and the narrator is quiet.
@@ -218,31 +218,59 @@ export async function open(ctx) {
   const chapterTitleOf = id => state.toc.filter(t => t.passage <= id).at(-1)?.title || '';
   const sectionOf = id => state.passages[id]?.section;
 
-  function push(force) {
-    const key = `${state.passage}:${audioNow()}`; if (!force && key === state.lastPushed) return; state.lastPushed = key;
-    api(`/api/works/${work.id}/position`, { method: 'PUT', body: { passage: state.passage, audio: audioNow() } }).then(p => places?.known.set(work.id, p.updated)).catch(() => {});
+  // An ordinary save names the server time of the place this tab last knew (`base`): when another device has saved
+  // since, the server refuses it, the save is dropped and the same question as on returning to the tab is asked.
+  async function push(force) {
+    const key = `${state.passage}:${audioNow()}`; if (!force && key === state.lastPushed) return; const prev = state.lastPushed; state.lastPushed = key;
+    const r = await ctx.savePlace(work.id, { passage: state.passage, audio: audioNow() }).catch(() => null);
+    // A failed save is not a saved place: put the old value back (unless a later push set its own) so the timer, the next push, the beacon and the connection coming back try again.
+    if (!r) { if (state.lastPushed === key) state.lastPushed = prev; return; }
+    if (!r.conflict) { places?.known.set(work.id, r.saved.updated); return; }
+    // Not asked while one question is open or the tab is hidden (coming back to it asks); the save is tried again later.
+    if (!places || state.destroyed || state.checking || document.visibilityState !== 'visible') { state.lastPushed = ''; return; }
+    if (state.dismissed === r.conflict.updated) return;
+    state.checking = true;
+    try { const c = await resolveElsewhere(r.conflict); if (c === 'kept') push(true); else if (c === 'later') state.dismissed = r.conflict.updated; } finally { state.checking = false; }
   }
 
-  // Back to this tab after another device moved the book: the text never moves by itself, so a place far from this
-  // one is offered (Go there / Stay here); a close one is left as it is.
+  // The rules for a newer place from another device: the text never moves by itself, so a place far from this
+  // one is offered (Go there / Stay here); a close one, or any while narrating here, is left as it is.
+  // Resolves 'there', 'here', 'kept' or 'later' (dismissed).
+  async function resolveElsewhere(remote) {
+    const here = { passage: state.passage, audio: audioNow() };
+    if (!places.apart(here, remote) || (narrating() && player.isPlaying())) { places.known.set(work.id, remote.updated); return 'kept'; }
+    const choice = await places.ask(detail, remote, here);
+    if (choice === 'there') {
+      places.known.set(work.id, remote.updated);
+      const p = remote.passage > 0 || !(remote.audio > 0) ? remote.passage : passageForAudio(remote.audio);
+      // The audio goes with the text, or the next save would send the new sentence with the old listening time.
+      // A paused player stays paused (seekTo only resumes one that was playing, and this branch is never reached while it plays).
+      // A place without a listening time leaves the audio where it is.
+      const at = remote.audio;
+      if (at > 0) {
+        if (narrating()) { await player.seekTo(at, true); player.pushed = `${work.id}:${player.globalMs()}`; }
+        else detail.position = { ...(detail.position || {}), audio: at };
+      }
+      if (state.passages[p]) { state.passage = p; await navigate(() => goTo(p)); }
+      state.lastPushed = `${state.passage}:${audioNow()}`;
+    } else if (choice === 'here') { places.known.set(work.id, remote.updated); push(true); }
+    return choice;
+  }
+
+  // Back to this tab after another device moved the book.
   async function checkElsewhere() {
     if (!places || state.destroyed || state.checking || document.visibilityState !== 'visible') return;
     state.checking = true;
     try {
       const remote = await api(`/api/works/${work.id}/position`).catch(() => null);
       if (!remote || remote.updated <= (places.known.get(work.id) || 0)) return;
-      const here = { passage: state.passage, audio: audioNow() };
-      if (!places.apart(here, remote) || (narrating() && player.isPlaying())) { places.known.set(work.id, remote.updated); return; }
-      const choice = await places.ask(detail, remote, here);
-      if (choice === 'there') {
-        places.known.set(work.id, remote.updated);
-        const p = remote.passage > 0 || !(remote.audio > 0) ? remote.passage : passageForAudio(remote.audio);
-        if (state.passages[p]) { state.passage = p; await navigate(() => goTo(p)); }
-        state.lastPushed = `${state.passage}:${audioNow()}`;
-      } else if (choice === 'here') { places.known.set(work.id, remote.updated); push(true); }
+      await resolveElsewhere(remote);
     } finally { state.checking = false; }
   }
   document.addEventListener('visibilitychange', checkElsewhere);
+  // The connection came back: a save that failed while offline is tried again without the person doing anything.
+  function retryPush() { if (!state.destroyed) push(false); }
+  window.addEventListener('online', retryPush);
   state.timer = setInterval(() => push(false), 20000);
 
   // ---- Marks: bookmarks on a page's first sentence, highlights on sentences, notes on either.
@@ -257,7 +285,7 @@ export async function open(ctx) {
     state.marks = state.marks.filter(x => !(x.kind === kind && x.passage === passage)); drawMarks();
     try { await api(`/api/me/marks/${work.id}/${kind}/${passage}`, { method: 'DELETE' }); } catch (e) { ctxToast(e.message); }
   }
-  const ctxToast = text => { const t = document.querySelector('#toast'); t.textContent = text; t.hidden = false; clearTimeout(ctxToast.timer); ctxToast.timer = setTimeout(() => { t.hidden = true; }, 2500); };
+  const ctxToast = text => { const t = document.querySelector('#toast'); t.onclick = null; t.style.cursor = ''; t.textContent = text; t.hidden = false; clearTimeout(ctxToast.timer); ctxToast.timer = setTimeout(() => { t.hidden = true; }, 2500); };
   bmBtn.onclick = async () => {
     const v = visible(); if (!v) return;
     const has = state.marks.find(m => m.kind === 'bookmark' && m.passage >= v.first && m.passage <= v.last);

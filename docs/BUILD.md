@@ -19,20 +19,9 @@ The default build reads and listens from a UnisonServer and is about 25 MB (debu
 
 `Bootstrap.ps1` fetches `vendor/` (Foliate-js at a pinned commit, native sources) and the model, checking hashes. `vendor/`, models, build output and the test books are not in Git. `Start-Emulator.ps1` opens the `HomescreenReader_API36` emulator with sound; `-Headless` runs it silently for tests.
 
-## The watch app
-
-```powershell
-.\gradlew.bat :wear:assembleDebug                      # wear\build\outputs\apk\debug\wear-debug.apk, about 34 MB
-adb -s <watch> install -r wear\build\outputs\apk\debug\wear-debug.apk
-```
-
-Unison for Wear OS is its own app (`dev.homescreenreader.wear`, Wear OS 6 and later), so a watch build can never land on the phone app or the other way round. It takes its version from `app/build.gradle.kts` and the server's address from `unison.defaultServer` in `local.properties`; `-Punison.defaultServer=http://10.0.2.2:8099` builds one for a watch emulator against the local test server. A real watch is reached over Wi-Fi: on the watch, Settings → Developer options → Wireless debugging; `adb pair <address:port> <code>` once, then `adb connect <address:port>` and install with `-s <address:port>`.
-
-`.\Start-Emulator.ps1 -Watch` starts the Wear OS 7 emulator (`UnisonWatch_API37`; the script's first lines say how it was made), `-Cold` without its snapshot. With more than one emulator running, `adb -e` no longer says which: name the serial (`-s emulator-5554`), also to `Tap-Emulator.ps1 -Serial`.
-
 ## Server
 
-`.\Start-LocalServer.ps1` runs the server on this machine against a throwaway library (seven made-up ebooks cut from the EPUB in `test-fixtures/books` and two short audiobooks of generated tones; a machine without ffprobe gets a stand-in for it, `server\local\ffprobe_stub.cs`) at `http://localhost:8099`, with two test accounts whose generated passwords are in `build\local-server\credentials.txt`: the place to try server and web changes before a deploy. `python server\local\check_phase9.py [--online]` exercises the lists, the wanted list and the metadata overlay against it, `python server\local\check_link.py` Wear OS sign-in (restart the server before a second run), and `jshell --class-path "server\build\install\server\lib\*" server\local\check_resume.jsh` the watch's resumable download.
+`.\Start-LocalServer.ps1` runs the server on this machine against a throwaway library (seven made-up ebooks cut from the EPUB in `test-fixtures/books` and two short audiobooks of generated tones; a machine without ffprobe gets a stand-in for it, `server\local\ffprobe_stub.cs`) at `http://localhost:8099`, with two test accounts whose generated passwords are in `build\local-server\credentials.txt`: the place to try server and web changes before a deploy. `python server\local\check_phase9.py [--online]` exercises the lists, the wanted list and the metadata overlay against it.
 
 `.\Start-LocalServer.ps1 -Demo` runs it against a demo library instead: thirteen public-domain ebooks from Standard Ebooks and two LibriVox recordings, fetched on the first run (about 250 MB) and kept under `build\demo-downloads`. The two pairs are synced for real, which takes a minute or two and needs ffmpeg and ffprobe on PATH and the speech model from `Bootstrap.ps1`. `python server\local\seed_demo.py http://localhost:8099 build\demo-server` then gives its `admin` a shelf and a year of made-up reading. It is the quickest way to see narration follow in a browser without a library of your own, and the README's browser pictures come from it.
 
@@ -42,13 +31,12 @@ Unison for Wear OS is its own app (`dev.homescreenreader.wear`, Wear OS 6 and la
 
 The apps build with plain Gradle, without the PowerShell scripts. This path is what the repository's workflow runs on Ubuntu on every push; macOS has not been tried.
 
-You need JDK 21 and the Android SDK, found through `ANDROID_HOME` or `sdk.dir` in `local.properties`. The build asks for platform 36 (`compileSdk`; the watch app too), the NDK 27.2.12479018 and CMake 3.22.1, as set in `app/build.gradle.kts`; the SDK's command-line tools must be in `cmdline-tools/latest` for the next step to install the last two. The Android Gradle plugin downloads the build-tools it needs if the SDK's licences are accepted (`sdkmanager --licenses`).
+You need JDK 21 and the Android SDK, found through `ANDROID_HOME` or `sdk.dir` in `local.properties`. The build asks for platform 36 (`compileSdk`), the NDK 27.2.12479018 and CMake 3.22.1, as set in `app/build.gradle.kts`; the SDK's command-line tools must be in `cmdline-tools/latest` for the next step to install the last two. The Android Gradle plugin downloads the build-tools it needs if the SDK's licences are accepted (`sdkmanager --licenses`).
 
 ```sh
 sh ./bootstrap.sh --install-native-tools   # pinned third-party sources, the speech model, the NDK and CMake
-sh ./gradlew :app:assembleDebug :wear:assembleDebug -PpublicBuild --no-daemon --console=plain
-adb install -r app/build/outputs/apk/debug/app-debug.apk        # phone; add -e or -d to pick one device
-adb install -r wear/build/outputs/apk/debug/wear-debug.apk      # watch, as in the section above
+sh ./gradlew :app:assembleDebug -PpublicBuild --no-daemon --console=plain
+adb install -r app/build/outputs/apk/debug/app-debug.apk        # add -e or -d to pick one device
 ```
 
 `bootstrap.sh` does what `Bootstrap.ps1` does and holds the same pins; leave out `--install-native-tools` if the NDK and CMake are already installed. Run the wrapper through `sh`, since it may arrive without its executable bit. `-PpublicBuild` ignores any server address in `local.properties`.

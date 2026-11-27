@@ -16,8 +16,9 @@ object Server {
     fun bookId(workId: String) = "srv-$workId"
 
     /**
-     * Brings a synced server work into the local library: the EPUB (parsed here with the same parser the
-     * server used, so sentence ids agree), the server's alignment, the cover, and the audio either as
+     * Brings a synced server work into the local library: the EPUB (kept for the reader; the sentence list
+     * and table of contents come from the server so sentence ids agree, and the phone parses the EPUB itself only when
+     * the server gives no sentences), the server's alignment, the cover, and the audio either as
      * streamed URLs or as downloaded files. Blocking; call off the main thread.
      */
     fun add(context: Context, work: ServerClient.Work, download: Boolean, progress: (String) -> Unit = {}): Book {
@@ -29,18 +30,30 @@ object Server {
         require(detail.work.hasAudio || (detail.work.hasEbook && work.ebookFormat == "epub")) { "This book has neither an EPUB nor audio on the server" }
         val audioOnly = !(detail.work.hasEbook && work.ebookFormat == "epub")
         val epub = File(dir, "book.epub")
-        val local = if (audioOnly) Book(id, work.title, work.author) else {
-            progress("Fetching the ebook…")
-            client.download("/api/works/${work.id}/ebook", epub)
-            progress("Reading the ebook…")
-            Ebooks.parse(epub, File(context.cacheDir, "server-$id"), id)
-        }
         // The sentence boundaries must be the server's: its alignment indexes them, and the device's
         // sentence splitter can disagree with the server's by a few sentences, which would leave the
         // narration highlight a few sentences off. The page finds sentences by their text, so the
-        // server's list works there directly.
-        val remote = if (audioOnly) null else runCatching { client.passages(work.id) }.getOrNull()
-        val parsed = if (remote != null && remote.first.isNotEmpty()) local.copy(passages = remote.first, toc = remote.second.ifEmpty { local.toc }) else local
+        // server's list works there directly. When the server gives them, the book is built from them and
+        // the ebook is not parsed on the phone (which would also refuse a book over the phone's size limit).
+        val parseDir = File(context.cacheDir, "server-$id")
+        var remote: Pair<List<Passage>, List<Pair<String, Int>>>? = null
+        if (!audioOnly) {
+            progress("Fetching the ebook…")
+            client.download("/api/works/${work.id}/ebook", epub)
+            remote = runCatching { client.passages(work.id) }.getOrNull()?.takeIf { it.first.isNotEmpty() }
+        }
+        val parsed = when {
+            audioOnly -> Book(id, work.title, work.author)
+            remote != null -> {
+                // Left by earlier adds, which parsed on the phone.
+                if (parseDir.exists()) parseDir.deleteRecursively()
+                Book(id, work.title.ifBlank { detail.work.title }, work.author.ifBlank { detail.work.author }, passages = remote.first, toc = remote.second)
+            }
+            else -> {
+                progress("Reading the ebook…")
+                Ebooks.parse(epub, parseDir, id)
+            }
+        }
         val cover = File(dir, "cover.jpg")
         if (work.cover) runCatching { client.download("/api/works/${work.id}/cover", cover) }
         val tracks = detail.tracks.mapIndexed { i, t ->
